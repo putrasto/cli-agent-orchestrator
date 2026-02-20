@@ -11,6 +11,12 @@ POLL_SECONDS="${POLL_SECONDS:-2}"
 MAX_REVIEW_CYCLES="${MAX_REVIEW_CYCLES:-3}"
 EXPLORE_HEADER="*** ORIGINAL EXPLORE SUMMARY ***"
 SCENARIO_HEADER="*** SCENARIO TEST ***"
+ANALYST_SUMMARY_REGEX='^[[:space:]]*(\*\*\*[[:space:]]*)?ANALYST_SUMMARY([[:space:]]*\*\*\*|:)'
+PROGRAMMER_SUMMARY_REGEX='^[[:space:]]*(\*\*\*[[:space:]]*)?PROGRAMMER_SUMMARY([[:space:]]*\*\*\*|:)'
+REVIEW_RESULT_REGEX='^[[:space:]]*REVIEW_RESULT:[[:space:]]*(APPROVED|REVISE)\b'
+TEST_RESULT_REGEX='^[[:space:]]*RESULT:[[:space:]]*(PASS|FAIL)\b'
+PASS_RESULT_REGEX='^[[:space:]]*RESULT:[[:space:]]*PASS\b'
+APPROVED_REVIEW_REGEX='^[[:space:]]*REVIEW_RESULT:[[:space:]]*APPROVED\b'
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "Missing command: $1" >&2; exit 1; }
@@ -168,7 +174,7 @@ wait_for_expected_output() {
 
 is_review_approved() {
   local review_text="$1"
-  if echo "$review_text" | grep -Eiq '^REVIEW_RESULT:\s*APPROVED\b'; then
+  if echo "$review_text" | grep -Eiq "$APPROVED_REVIEW_REGEX"; then
     return 0
   fi
   return 1
@@ -237,7 +243,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "3) Return ANALYST_SUMMARY exactly as profile format.")"
     ANALYST_BEFORE="$(get_last_output "$ANALYST_ID" 2>/dev/null || true)"
     send_input "$ANALYST_ID" "$ANALYST_MSG"
-    wait_for_expected_output "$ANALYST_ID" "$ANALYST_BEFORE" 'ANALYST_SUMMARY:' 1800
+    wait_for_expected_output "$ANALYST_ID" "$ANALYST_BEFORE" "$ANALYST_SUMMARY_REGEX" 1800
     ANALYST_OUT="$(get_last_output "$ANALYST_ID")"
 
     ANALYST_REVIEW_MSG="$(printf '%s\n' \
@@ -255,7 +261,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "Return REVIEW_RESULT: APPROVED or REVIEW_RESULT: REVISE with REVIEW_NOTES.")"
     ANALYST_REVIEW_BEFORE="$(get_last_output "$PEER_ANALYST_ID" 2>/dev/null || true)"
     send_input "$PEER_ANALYST_ID" "$ANALYST_REVIEW_MSG"
-    wait_for_expected_output "$PEER_ANALYST_ID" "$ANALYST_REVIEW_BEFORE" '^REVIEW_RESULT:\s*(APPROVED|REVISE)\b' 1800
+    wait_for_expected_output "$PEER_ANALYST_ID" "$ANALYST_REVIEW_BEFORE" "$REVIEW_RESULT_REGEX" 1800
     ANALYST_REVIEW_OUT="$(get_last_output "$PEER_ANALYST_ID")"
 
     if is_review_approved "$ANALYST_REVIEW_OUT"; then
@@ -296,7 +302,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "3) Return PROGRAMMER_SUMMARY exactly as profile format.")"
     PROGRAMMER_BEFORE="$(get_last_output "$PROGRAMMER_ID" 2>/dev/null || true)"
     send_input "$PROGRAMMER_ID" "$PROGRAMMER_MSG"
-    wait_for_expected_output "$PROGRAMMER_ID" "$PROGRAMMER_BEFORE" 'PROGRAMMER_SUMMARY:' 1800
+    wait_for_expected_output "$PROGRAMMER_ID" "$PROGRAMMER_BEFORE" "$PROGRAMMER_SUMMARY_REGEX" 1800
     PROGRAMMER_OUT="$(get_last_output "$PROGRAMMER_ID")"
 
     PROGRAMMER_REVIEW_MSG="$(printf '%s\n' \
@@ -314,7 +320,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "Return REVIEW_RESULT: APPROVED or REVIEW_RESULT: REVISE with REVIEW_NOTES.")"
     PROGRAMMER_REVIEW_BEFORE="$(get_last_output "$PEER_PROGRAMMER_ID" 2>/dev/null || true)"
     send_input "$PEER_PROGRAMMER_ID" "$PROGRAMMER_REVIEW_MSG"
-    wait_for_expected_output "$PEER_PROGRAMMER_ID" "$PROGRAMMER_REVIEW_BEFORE" '^REVIEW_RESULT:\s*(APPROVED|REVISE)\b' 1800
+    wait_for_expected_output "$PEER_PROGRAMMER_ID" "$PROGRAMMER_REVIEW_BEFORE" "$REVIEW_RESULT_REGEX" 1800
     PROGRAMMER_REVIEW_OUT="$(get_last_output "$PEER_PROGRAMMER_ID")"
 
     if is_review_approved "$PROGRAMMER_REVIEW_OUT"; then
@@ -351,12 +357,12 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     "- Recommended next fix:")"
   TESTER_BEFORE="$(get_last_output "$TESTER_ID" 2>/dev/null || true)"
   send_input "$TESTER_ID" "$TESTER_MSG"
-  wait_for_expected_output "$TESTER_ID" "$TESTER_BEFORE" '^RESULT:\s*(PASS|FAIL)\b' 1800
+  wait_for_expected_output "$TESTER_ID" "$TESTER_BEFORE" "$TEST_RESULT_REGEX" 1800
   TEST_OUT="$(get_last_output "$TESTER_ID")"
 
   echo "$TEST_OUT"
 
-  if echo "$TEST_OUT" | grep -Eiq '^RESULT:\s*PASS\b'; then
+  if echo "$TEST_OUT" | grep -Eiq "$PASS_RESULT_REGEX"; then
     echo
     echo "FINAL: PASS"
     exit 0
