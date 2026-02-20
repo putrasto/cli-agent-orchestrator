@@ -17,9 +17,14 @@ IDLE_PROMPT_PATTERN = r"(?:❯|›|codex>)"
 # Match the prompt only if it appears at the end of the captured output.
 # Allows trailing text on the same line (e.g., "What would you like to do next?")
 IDLE_PROMPT_AT_END_PATTERN = rf"(?:^\s*{IDLE_PROMPT_PATTERN}\s*)\s*\Z"
+IDLE_PROMPT_LINE_PATTERN = rf"^\s*{IDLE_PROMPT_PATTERN}\s*$"
 IDLE_PROMPT_PATTERN_LOG = r"❯"
-ASSISTANT_PREFIX_PATTERN = r"^(?:assistant|codex|agent)\s*:"
-USER_PREFIX_PATTERN = r"^You\b"
+# Codex markers vary by version:
+# - legacy: "assistant:", "You ..."
+# - v0.104+: "• ..." (assistant), "› ..." (user)
+ASSISTANT_PREFIX_PATTERN = r"^(?:(?:assistant|codex|agent)\s*:|•\s+)"
+USER_PREFIX_PATTERN = r"^(?:You\b|›\s+\S)"
+CONTEXT_FOOTER_PATTERN = r"^\s*\d+%\s+context left\s*$"
 
 PROCESSING_PATTERN = r"\b(thinking|working|running|executing|processing|analyzing)\b"
 WAITING_PROMPT_PATTERN = r"^(?:Approve|Allow)\b.*\b(?:y/n|yes/no|yes|no)\b"
@@ -62,6 +67,7 @@ class CodexProvider(BaseProvider):
 
         clean_output = re.sub(ANSI_CODE_PATTERN, "", output)
         tail_output = "\n".join(clean_output.splitlines()[-25:])
+        tail_output_lower = tail_output.lower()
 
         last_user = None
         for match in re.finditer(USER_PREFIX_PATTERN, clean_output, re.IGNORECASE | re.MULTILINE):
@@ -79,6 +85,13 @@ class CodexProvider(BaseProvider):
 
         has_idle_prompt_at_end = bool(
             re.search(IDLE_PROMPT_AT_END_PATTERN, clean_output, re.IGNORECASE | re.MULTILINE)
+        )
+        # Codex v0.104+ prompt detection:
+        # The UI can show a "›" prompt with footer text like "100% context left",
+        # which means the prompt may not appear at the end of captured output.
+        has_v104_idle_prompt = (
+            "context left" in tail_output_lower
+            or bool(re.search(r"^\s*›\s*$", tail_output, re.IGNORECASE | re.MULTILINE))
         )
 
         # Only treat ERROR/WAITING prompts as actionable if they appear after the last user message
@@ -102,7 +115,7 @@ class CodexProvider(BaseProvider):
                 return TerminalStatus.WAITING_USER_ANSWER
             if re.search(ERROR_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
                 return TerminalStatus.ERROR
-        if has_idle_prompt_at_end:
+        if has_idle_prompt_at_end or has_v104_idle_prompt:
             # Consider COMPLETED only if we see an assistant marker after the last user message.
             if last_user is not None:
                 if re.search(
@@ -125,7 +138,7 @@ class CodexProvider(BaseProvider):
         return IDLE_PROMPT_PATTERN_LOG
 
     def extract_last_message_from_script(self, script_output: str) -> str:
-        """Extract Codex's final response message using assistant label markers."""
+        """Extract Codex's final response message from legacy or v0.104+ markers."""
         clean_output = re.sub(ANSI_CODE_PATTERN, "", script_output)
 
         matches = list(
@@ -138,14 +151,21 @@ class CodexProvider(BaseProvider):
         last_match = matches[-1]
         start_pos = last_match.end()
 
-        idle_after = re.search(
-            IDLE_PROMPT_AT_END_PATTERN,
-            clean_output[start_pos:],
-            re.IGNORECASE | re.MULTILINE,
-        )
-        end_pos = start_pos + idle_after.start() if idle_after else len(clean_output)
+        output_after_last_assistant = clean_output[start_pos:]
+        lines = output_after_last_assistant.splitlines()
+        message_lines = []
+        for idx, line in enumerate(lines):
+            # Only treat prompt/user/footer lines as boundaries after we've started
+            # collecting assistant content.
+            if idx > 0 and (
+                re.match(USER_PREFIX_PATTERN, line, re.IGNORECASE)
+                or re.match(IDLE_PROMPT_LINE_PATTERN, line, re.IGNORECASE)
+                or re.match(CONTEXT_FOOTER_PATTERN, line, re.IGNORECASE)
+            ):
+                break
+            message_lines.append(line)
 
-        final_answer = clean_output[start_pos:end_pos].strip()
+        final_answer = "\n".join(message_lines).strip()
 
         if not final_answer:
             raise ValueError("Empty Codex response - no content found")

@@ -228,6 +228,52 @@ class TestCodexProviderStatusDetection:
 
         assert status == TerminalStatus.ERROR
 
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_idle_with_v104_prompt_and_footer(self, mock_tmux):
+        mock_tmux.get_history.return_value = "Welcome to Codex\n› Plan the fix\n100% context left\n"
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.IDLE
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_completed_with_v104_prompt_and_footer(self, mock_tmux):
+        mock_tmux.get_history.return_value = (
+            "You fix the bug\n"
+            "assistant: Done. I updated the matcher.\n"
+            "›\n"
+            "100% context left\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.COMPLETED
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_completed_with_v104_user_and_assistant_markers(self, mock_tmux):
+        mock_tmux.get_history.return_value = (
+            "› Reply with READY\n"
+            "• READY\n"
+            "›\n"
+            "100% context left\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.COMPLETED
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_processing_with_v104_markers_without_idle_prompt(self, mock_tmux):
+        mock_tmux.get_history.return_value = "› Reply with READY\n• Working on it...\n"
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.PROCESSING
+
 
 class TestCodexProviderMessageExtraction:
     def test_extract_last_message_success(self):
@@ -263,6 +309,22 @@ class TestCodexProviderMessageExtraction:
 
         with pytest.raises(ValueError, match="Empty Codex response"):
             provider.extract_last_message_from_script(output)
+
+    def test_extract_message_v104_bullet_marker(self):
+        output = "› Reply with READY2\n• READY2\n›\n100% context left\n"
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        message = provider.extract_last_message_from_script(output)
+
+        assert message == "READY2"
+
+    def test_extract_message_v104_multiline_bullet_response(self):
+        output = "› Explain the fix\n• Here's the fix\nUpdate matcher for • and ›\n›\n100% context left\n"
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        message = provider.extract_last_message_from_script(output)
+
+        assert message == "Here's the fix\nUpdate matcher for • and ›"
 
 
 class TestCodexProviderMisc:
