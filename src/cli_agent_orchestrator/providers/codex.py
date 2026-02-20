@@ -12,7 +12,8 @@ from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_sta
 logger = logging.getLogger(__name__)
 
 # Regex patterns for Codex output analysis
-ANSI_CODE_PATTERN = r"\x1b\[[0-9;]*m"
+ANSI_CODE_PATTERN = r"\x1b\[[0-?]*[ -/]*[@-~]"
+OSC_PATTERN = r"\x1b\][^\x07]*(?:\x07|\x1b\\)"
 IDLE_PROMPT_PATTERN = r"(?:❯|›|codex>)"
 # Match the prompt only if it appears at the end of the captured output.
 # Allows trailing text on the same line (e.g., "What would you like to do next?")
@@ -45,6 +46,13 @@ class CodexProvider(BaseProvider):
         self._initialized = False
         self._agent_profile = agent_profile
 
+    @staticmethod
+    def _clean_terminal_output(output: str) -> str:
+        """Strip control sequences and normalize line endings for parsing."""
+        output = re.sub(OSC_PATTERN, "", output)
+        output = re.sub(ANSI_CODE_PATTERN, "", output)
+        return output.replace("\r", "\n")
+
     def initialize(self) -> bool:
         """Initialize Codex provider by starting codex command."""
         if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
@@ -65,7 +73,7 @@ class CodexProvider(BaseProvider):
         if not output:
             return TerminalStatus.ERROR
 
-        clean_output = re.sub(ANSI_CODE_PATTERN, "", output)
+        clean_output = self._clean_terminal_output(output)
         tail_output = "\n".join(clean_output.splitlines()[-25:])
         tail_output_lower = tail_output.lower()
 
@@ -139,7 +147,7 @@ class CodexProvider(BaseProvider):
 
     def extract_last_message_from_script(self, script_output: str) -> str:
         """Extract Codex's final response message from legacy or v0.104+ markers."""
-        clean_output = re.sub(ANSI_CODE_PATTERN, "", script_output)
+        clean_output = self._clean_terminal_output(script_output)
 
         matches = list(
             re.finditer(ASSISTANT_PREFIX_PATTERN, clean_output, re.IGNORECASE | re.MULTILINE)

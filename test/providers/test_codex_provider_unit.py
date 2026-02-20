@@ -326,6 +326,22 @@ class TestCodexProviderMessageExtraction:
 
         assert message == "Here's the fix\nUpdate matcher for • and ›"
 
+    def test_extract_message_with_ansi_control_sequences(self):
+        output = (
+            "› Return ANALYST_SUMMARY\n"
+            "\x1b[1m\x1b[38;2;231;231;231;49m•\x1b[39m\x1b[49m "
+            "*** ANALYST_SUMMARY ***\x1b[22;3H›Run /review on my current changes?\n"
+            "Problem summary line\x1b[0m\n"
+            "›\n"
+            "100% context left\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        message = provider.extract_last_message_from_script(output)
+
+        assert "*** ANALYST_SUMMARY ***" in message
+        assert "Problem summary line" in message
+
 
 class TestCodexProviderMisc:
     def test_get_idle_pattern_for_log(self):
