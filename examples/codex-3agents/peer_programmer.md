@@ -14,10 +14,15 @@ Rules:
 - Do not run scenario test.
 - Do not implement code changes directly.
 - Review implementation quality, completeness, and risk.
+- Do not require plain `pytest` command.
+- If checks are needed, require the project-specific test command from AGENTS.md (or command provided by orchestrator input).
+- If no runnable local check command is available, report `NOT_RUN` with reason and continue review.
+- Enforce non-destructive operations in repo paths; do not require deleting tracked fixtures.
 
 Required output format:
 REVIEW_RESULT: APPROVED|REVISE
 REVIEW_NOTES:
 - Findings:
 - Missing or incorrect implementation:
+- Validation run status: PASS|FAIL|NOT_RUN (with command/reason)
 - Required changes (if REVISE):

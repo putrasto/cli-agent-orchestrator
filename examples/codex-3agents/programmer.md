@@ -15,6 +15,11 @@ Rules:
 - programmer: dont do scenario test
 - Keep changes focused and testable.
 - Report what changed and what remains risky.
+- Do not assume plain `pytest` exists.
+- Use the project-specific test command from AGENTS.md (or the command provided by orchestrator input).
+- Do not run destructive commands in repo paths (`rm`, `git clean`, `git reset --hard`, overwrite moves).
+- Do not delete `tests/fixtures/**`.
+- Write temporary artifacts only under `.tmp/` in project or `/tmp/`.
 
 Required output format:
 PROGRAMMER_SUMMARY:

@@ -9,6 +9,8 @@ PROMPT_FILE="${PROMPT_FILE:-}"
 MAX_ROUNDS="${MAX_ROUNDS:-8}"
 POLL_SECONDS="${POLL_SECONDS:-2}"
 MAX_REVIEW_CYCLES="${MAX_REVIEW_CYCLES:-3}"
+HANDOFF_STABLE_POLLS="${HANDOFF_STABLE_POLLS:-2}"
+PROJECT_TEST_CMD="${PROJECT_TEST_CMD:-}"
 EXPLORE_HEADER="*** ORIGINAL EXPLORE SUMMARY ***"
 SCENARIO_HEADER="*** SCENARIO TEST ***"
 ANALYST_SUMMARY_REGEX='(^|[^[:alnum:]_])ANALYST_SUMMARY([^[:alnum:]_]|$)'
@@ -87,6 +89,14 @@ if [[ -z "${SCENARIO_TEST//[[:space:]]/}" ]]; then
   echo "SCENARIO TEST section is empty." >&2
   exit 1
 fi
+
+test_command_instruction() {
+  if [[ -n "${PROJECT_TEST_CMD//[[:space:]]/}" ]]; then
+    printf 'Use this project test command when validating locally: %s' "$PROJECT_TEST_CMD"
+  else
+    printf 'Use project-specific test command from AGENTS.md (do not assume plain pytest).'
+  fi
+}
 
 create_session() {
   local profile="$1"
@@ -175,6 +185,8 @@ wait_for_expected_output() {
   local expected_regex="$3"
   local timeout_seconds="${4:-1800}"
   local start now status current_output
+  local stable_count=0
+  local stable_candidate=""
   start="$(date +%s)"
 
   while true; do
@@ -186,10 +198,20 @@ wait_for_expected_output() {
       return 1
     fi
 
-    if [[ "$current_output" != "$previous_output" ]] && [[ "$status" == "idle" || "$status" == "completed" ]]; then
-      if echo "$current_output" | grep -Eiq "$expected_regex"; then
+    if [[ "$current_output" != "$previous_output" ]] && [[ "$status" == "idle" || "$status" == "completed" ]] && echo "$current_output" | grep -Eiq "$expected_regex"; then
+      if [[ "$current_output" == "$stable_candidate" ]]; then
+        stable_count=$((stable_count + 1))
+      else
+        stable_candidate="$current_output"
+        stable_count=1
+      fi
+
+      if (( stable_count >= HANDOFF_STABLE_POLLS )); then
         return 0
       fi
+    else
+      stable_count=0
+      stable_candidate=""
     fi
 
     now="$(date +%s)"
@@ -339,11 +361,16 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "" \
       "Guard lines:" \
       "programmer: dont do scenario test" \
+      "Autonomy rules: do not run destructive commands in repo paths (rm, git clean, git reset --hard, overwrite moves)" \
+      "Autonomy rules: do not delete tests/fixtures/**" \
+      "Autonomy rules: write temporary artifacts only under .tmp/ or /tmp/" \
       "" \
       "Task:" \
       "1) Apply OpenSpec changes using openspec-apply-change skill." \
       "2) Implement required code changes." \
-      "3) Return PROGRAMMER_SUMMARY exactly as profile format.")"
+      "3) Return PROGRAMMER_SUMMARY exactly as profile format." \
+      "4) For optional local validation, do not assume plain pytest." \
+      "5) $(test_command_instruction)")"
     PROGRAMMER_BEFORE="$(get_structured_output "$PROGRAMMER_ID" "$PROGRAMMER_SUMMARY_REGEX" 2>/dev/null || true)"
     send_input "$PROGRAMMER_ID" "$PROGRAMMER_MSG"
     wait_for_expected_output "$PROGRAMMER_ID" "$PROGRAMMER_BEFORE" "$PROGRAMMER_SUMMARY_REGEX" 1800
@@ -359,9 +386,13 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "" \
       "Guard lines:" \
       "peer programmer: review only, dont do scenario test, dont implement code" \
+      "peer programmer: enforce non-destructive repo operations and no fixture deletion" \
       "" \
       "Task:" \
       "Review implementation completeness and quality." \
+      "Do not require plain pytest command." \
+      "$(test_command_instruction)" \
+      "If no runnable command exists, report Validation run status: NOT_RUN with reason and continue review." \
       "Return REVIEW_RESULT: APPROVED or REVIEW_RESULT: REVISE with REVIEW_NOTES.")"
     PROGRAMMER_REVIEW_BEFORE="$(get_structured_output "$PEER_PROGRAMMER_ID" "$REVIEW_RESULT_REGEX" 2>/dev/null || true)"
     send_input "$PEER_PROGRAMMER_ID" "$PROGRAMMER_REVIEW_MSG"
