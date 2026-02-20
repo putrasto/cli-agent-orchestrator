@@ -3,7 +3,7 @@
 import logging
 import time
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import httpx
 
@@ -64,13 +64,18 @@ def wait_until_status(
     target_status: TerminalStatus,
     timeout: float = 30.0,
     polling_interval: float = 1.0,
+    on_poll: Callable[["BaseProvider", TerminalStatus, int, float], None] | None = None,
 ) -> bool:
     """Wait until provider reaches target status or timeout."""
     start_time = time.time()
+    poll_count = 0
 
     while time.time() - start_time < timeout:
+        poll_count += 1
         status = provider_instance.get_status()
         logger.info(f"Waiting for {target_status}, current status: {status}")
+        if on_poll:
+            on_poll(provider_instance, status, poll_count, time.time() - start_time)
         if status == target_status:
             return True
         time.sleep(polling_interval)

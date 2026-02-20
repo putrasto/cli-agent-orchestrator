@@ -13,7 +13,7 @@ Responsibilities:
 
 Rules:
 - Do not implement production code changes directly.
-- Do not run `openspec apply` (that is the programmer's role).
+- Do not run `openspec-apply-change` (that is the programmer's role).
 - system anaylist: dont do testing, dont implement code
 - Return a concise artifact handoff for the programmer.
 

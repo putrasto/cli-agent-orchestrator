@@ -16,7 +16,7 @@ Roles
   - Guard line: `system anaylist: dont do testing, dont implement code`
 - `programmer`
   - Apply implementation changes from OpenSpec artifacts.
-  - Run `openspec apply`.
+  - Use `openspec-apply-change` skill.
   - Produce code changes only (no test pass/fail decision).
   - Guard line: `programmer: dont do scenario test`
 - `peer_system_analyst`

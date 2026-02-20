@@ -1,6 +1,7 @@
 """Terminal service with workflow functions."""
 
 import logging
+import os
 from datetime import datetime
 from enum import Enum
 from typing import Dict, Optional
@@ -30,6 +31,14 @@ class OutputMode(str, Enum):
 
     FULL = "full"
     LAST = "last"
+
+
+def _get_int_env(name: str, default: int) -> int:
+    """Parse int env var with safe fallback."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def create_terminal(
@@ -188,11 +197,18 @@ def get_output(terminal_id: str, mode: OutputMode = OutputMode.FULL) -> str:
         if not metadata:
             raise ValueError(f"Terminal '{terminal_id}' not found")
 
-        full_output = tmux_client.get_history(metadata["tmux_session"], metadata["tmux_window"])
-
         if mode == OutputMode.FULL:
+            full_output = tmux_client.get_history(metadata["tmux_session"], metadata["tmux_window"])
             return full_output
         elif mode == OutputMode.LAST:
+            # LAST extraction needs a larger window than status checks.
+            # Long agent replies can exceed 200 lines and drop the assistant marker.
+            last_output_history_lines = _get_int_env("CAO_LAST_OUTPUT_HISTORY_LINES", 2000)
+            full_output = tmux_client.get_history(
+                metadata["tmux_session"],
+                metadata["tmux_window"],
+                tail_lines=last_output_history_lines,
+            )
             provider = provider_manager.get_provider(terminal_id)
             if provider is None:
                 raise ValueError(f"Provider not found for terminal {terminal_id}")

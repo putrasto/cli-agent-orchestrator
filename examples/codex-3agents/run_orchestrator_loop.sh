@@ -11,8 +11,8 @@ POLL_SECONDS="${POLL_SECONDS:-2}"
 MAX_REVIEW_CYCLES="${MAX_REVIEW_CYCLES:-3}"
 EXPLORE_HEADER="*** ORIGINAL EXPLORE SUMMARY ***"
 SCENARIO_HEADER="*** SCENARIO TEST ***"
-ANALYST_SUMMARY_REGEX='^[[:space:]]*(\*\*\*[[:space:]]*)?ANALYST_SUMMARY([[:space:]]*\*\*\*|:)'
-PROGRAMMER_SUMMARY_REGEX='^[[:space:]]*(\*\*\*[[:space:]]*)?PROGRAMMER_SUMMARY([[:space:]]*\*\*\*|:)'
+ANALYST_SUMMARY_REGEX='(^|[^[:alnum:]_])ANALYST_SUMMARY([^[:alnum:]_]|$)'
+PROGRAMMER_SUMMARY_REGEX='(^|[^[:alnum:]_])PROGRAMMER_SUMMARY([^[:alnum:]_]|$)'
 REVIEW_RESULT_REGEX='^[[:space:]]*REVIEW_RESULT:[[:space:]]*(APPROVED|REVISE)\b'
 TEST_RESULT_REGEX='^[[:space:]]*RESULT:[[:space:]]*(PASS|FAIL)\b'
 PASS_RESULT_REGEX='^[[:space:]]*RESULT:[[:space:]]*PASS\b'
@@ -20,6 +20,10 @@ APPROVED_REVIEW_REGEX='^[[:space:]]*REVIEW_RESULT:[[:space:]]*APPROVED\b'
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "Missing command: $1" >&2; exit 1; }
+}
+
+log() {
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 
 require_cmd curl
@@ -196,12 +200,12 @@ PEER_PROGRAMMER_ID="$(echo "$PEER_PROGRAMMER_JSON" | jq -r '.id')"
 TESTER_JSON="$(create_terminal "$SESSION_NAME" tester)"
 TESTER_ID="$(echo "$TESTER_JSON" | jq -r '.id')"
 
-echo "SESSION_NAME=$SESSION_NAME"
-echo "ANALYST_ID=$ANALYST_ID"
-echo "PEER_ANALYST_ID=$PEER_ANALYST_ID"
-echo "PROGRAMMER_ID=$PROGRAMMER_ID"
-echo "PEER_PROGRAMMER_ID=$PEER_PROGRAMMER_ID"
-echo "TESTER_ID=$TESTER_ID"
+log "SESSION_NAME=$SESSION_NAME"
+log "ANALYST_ID=$ANALYST_ID"
+log "PEER_ANALYST_ID=$PEER_ANALYST_ID"
+log "PROGRAMMER_ID=$PROGRAMMER_ID"
+log "PEER_PROGRAMMER_ID=$PEER_PROGRAMMER_ID"
+log "TESTER_ID=$TESTER_ID"
 
 cleanup() {
   curl -fsS -X POST "$API/terminals/$ANALYST_ID/exit" >/dev/null || true
@@ -216,13 +220,14 @@ feedback="None yet."
 
 for round in $(seq 1 "$MAX_ROUNDS"); do
   echo
-  echo "=== ROUND $round ==="
+  log "=== ROUND $round ==="
 
   analyst_feedback="None yet."
   ANALYST_APPROVED=0
   ANALYST_OUT=""
   ANALYST_REVIEW_OUT=""
   for analyst_cycle in $(seq 1 "$MAX_REVIEW_CYCLES"); do
+    log "[round $round] system_analyst: cycle $analyst_cycle - exploring and updating openspec"
     ANALYST_MSG="$(printf '%s\n' \
       "*** ORIGINAL EXPLORE SUMMARY ***" \
       "$EXPLORE_SUMMARY" \
@@ -246,6 +251,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     wait_for_expected_output "$ANALYST_ID" "$ANALYST_BEFORE" "$ANALYST_SUMMARY_REGEX" 1800
     ANALYST_OUT="$(get_last_output "$ANALYST_ID")"
 
+    log "[round $round] peer_system_analyst: cycle $analyst_cycle - reviewing analyst output"
     ANALYST_REVIEW_MSG="$(printf '%s\n' \
       "*** ORIGINAL EXPLORE SUMMARY ***" \
       "$EXPLORE_SUMMARY" \
@@ -265,16 +271,18 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     ANALYST_REVIEW_OUT="$(get_last_output "$PEER_ANALYST_ID")"
 
     if is_review_approved "$ANALYST_REVIEW_OUT"; then
+      log "[round $round] peer_system_analyst: APPROVED"
       ANALYST_APPROVED=1
       break
     fi
+    log "[round $round] peer_system_analyst: REVISE"
     analyst_feedback="$ANALYST_REVIEW_OUT"
   done
 
   if [[ "$ANALYST_APPROVED" -ne 1 ]]; then
+    log "[round $round] analyst gate: MAX_REVIEW_CYCLES reached, proceeding without approval"
     feedback="Peer analyst did not approve after MAX_REVIEW_CYCLES. Latest review:\n$ANALYST_REVIEW_OUT"
-    echo "$feedback"
-    continue
+    log "$feedback"
   fi
 
   programmer_feedback="None yet."
@@ -282,6 +290,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
   PROGRAMMER_OUT=""
   PROGRAMMER_REVIEW_OUT=""
   for programmer_cycle in $(seq 1 "$MAX_REVIEW_CYCLES"); do
+    log "[round $round] programmer: cycle $programmer_cycle - applying openspec and implementing"
     PROGRAMMER_MSG="$(printf '%s\n' \
       "*** ORIGINAL EXPLORE SUMMARY ***" \
       "$EXPLORE_SUMMARY" \
@@ -297,7 +306,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "programmer: dont do scenario test" \
       "" \
       "Task:" \
-      "1) Apply OpenSpec changes with openspec apply." \
+      "1) Apply OpenSpec changes using openspec-apply-change skill." \
       "2) Implement required code changes." \
       "3) Return PROGRAMMER_SUMMARY exactly as profile format.")"
     PROGRAMMER_BEFORE="$(get_last_output "$PROGRAMMER_ID" 2>/dev/null || true)"
@@ -305,6 +314,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     wait_for_expected_output "$PROGRAMMER_ID" "$PROGRAMMER_BEFORE" "$PROGRAMMER_SUMMARY_REGEX" 1800
     PROGRAMMER_OUT="$(get_last_output "$PROGRAMMER_ID")"
 
+    log "[round $round] peer_programmer: cycle $programmer_cycle - reviewing implementation"
     PROGRAMMER_REVIEW_MSG="$(printf '%s\n' \
       "*** ORIGINAL EXPLORE SUMMARY ***" \
       "$EXPLORE_SUMMARY" \
@@ -324,18 +334,21 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     PROGRAMMER_REVIEW_OUT="$(get_last_output "$PEER_PROGRAMMER_ID")"
 
     if is_review_approved "$PROGRAMMER_REVIEW_OUT"; then
+      log "[round $round] peer_programmer: APPROVED"
       PROGRAMMER_APPROVED=1
       break
     fi
+    log "[round $round] peer_programmer: REVISE"
     programmer_feedback="$PROGRAMMER_REVIEW_OUT"
   done
 
   if [[ "$PROGRAMMER_APPROVED" -ne 1 ]]; then
+    log "[round $round] programmer gate: MAX_REVIEW_CYCLES reached, proceeding without approval"
     feedback="Peer programmer did not approve after MAX_REVIEW_CYCLES. Latest review:\n$PROGRAMMER_REVIEW_OUT"
-    echo "$feedback"
-    continue
+    log "$feedback"
   fi
 
+  log "[round $round] tester: running scenario test"
   TESTER_MSG="$(printf '%s\n' \
     "*** SCENARIO TEST ***" \
     "$SCENARIO_TEST" \
@@ -364,13 +377,14 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
 
   if echo "$TEST_OUT" | grep -Eiq "$PASS_RESULT_REGEX"; then
     echo
-    echo "FINAL: PASS"
+    log "FINAL: PASS"
     exit 0
   fi
 
   feedback="$TEST_OUT"
-  echo "FINAL: FAIL (retrying)"
+  log "[round $round] tester: FAIL, retrying with feedback"
+  log "FINAL: FAIL (retrying)"
 done
 
-echo "Reached MAX_ROUNDS=$MAX_ROUNDS without PASS"
+log "Reached MAX_ROUNDS=$MAX_ROUNDS without PASS"
 exit 1
