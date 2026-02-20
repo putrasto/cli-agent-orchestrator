@@ -133,6 +133,38 @@ get_last_output() {
   curl -fsS "$API/terminals/$terminal_id/output?mode=last" | jq -r '.output'
 }
 
+wait_for_agent_response() {
+  local terminal_id="$1"
+  local previous_output="$2"
+  local timeout_seconds="${3:-1800}"
+  local start now status current_output
+  start="$(date +%s)"
+
+  while true; do
+    status="$(get_status "$terminal_id")"
+    current_output="$(get_last_output "$terminal_id" 2>/dev/null || true)"
+
+    if [[ "$status" == "error" ]]; then
+      echo "Terminal $terminal_id entered ERROR state" >&2
+      return 1
+    fi
+
+    if [[ "$current_output" != "$previous_output" ]] && [[ "$status" == "idle" || "$status" == "completed" ]]; then
+      if ! echo "$current_output" | grep -Eq '^Working \([0-9]+s'; then
+        return 0
+      fi
+    fi
+
+    now="$(date +%s)"
+    if (( now - start > timeout_seconds )); then
+      echo "Timeout waiting for response from terminal $terminal_id (status=$status)" >&2
+      return 1
+    fi
+
+    sleep "$POLL_SECONDS"
+  done
+}
+
 is_review_approved() {
   local review_text="$1"
   if echo "$review_text" | grep -Eiq '^REVIEW_RESULT:\s*APPROVED\b'; then
@@ -202,8 +234,9 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "1) Explore the codebase." \
       "2) Create/update all OpenSpec artifacts using ff command." \
       "3) Return ANALYST_SUMMARY exactly as profile format.")"
+    ANALYST_BEFORE="$(get_last_output "$ANALYST_ID" 2>/dev/null || true)"
     send_input "$ANALYST_ID" "$ANALYST_MSG"
-    wait_for_terminal "$ANALYST_ID" 1800
+    wait_for_agent_response "$ANALYST_ID" "$ANALYST_BEFORE" 1800
     ANALYST_OUT="$(get_last_output "$ANALYST_ID")"
 
     ANALYST_REVIEW_MSG="$(printf '%s\n' \
@@ -219,8 +252,9 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "Task:" \
       "Review analyst output quality and OpenSpec completeness." \
       "Return REVIEW_RESULT: APPROVED or REVIEW_RESULT: REVISE with REVIEW_NOTES.")"
+    ANALYST_REVIEW_BEFORE="$(get_last_output "$PEER_ANALYST_ID" 2>/dev/null || true)"
     send_input "$PEER_ANALYST_ID" "$ANALYST_REVIEW_MSG"
-    wait_for_terminal "$PEER_ANALYST_ID" 1800
+    wait_for_agent_response "$PEER_ANALYST_ID" "$ANALYST_REVIEW_BEFORE" 1800
     ANALYST_REVIEW_OUT="$(get_last_output "$PEER_ANALYST_ID")"
 
     if is_review_approved "$ANALYST_REVIEW_OUT"; then
@@ -259,8 +293,9 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "1) Apply OpenSpec changes with openspec apply." \
       "2) Implement required code changes." \
       "3) Return PROGRAMMER_SUMMARY exactly as profile format.")"
+    PROGRAMMER_BEFORE="$(get_last_output "$PROGRAMMER_ID" 2>/dev/null || true)"
     send_input "$PROGRAMMER_ID" "$PROGRAMMER_MSG"
-    wait_for_terminal "$PROGRAMMER_ID" 1800
+    wait_for_agent_response "$PROGRAMMER_ID" "$PROGRAMMER_BEFORE" 1800
     PROGRAMMER_OUT="$(get_last_output "$PROGRAMMER_ID")"
 
     PROGRAMMER_REVIEW_MSG="$(printf '%s\n' \
@@ -276,8 +311,9 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "Task:" \
       "Review implementation completeness and quality." \
       "Return REVIEW_RESULT: APPROVED or REVIEW_RESULT: REVISE with REVIEW_NOTES.")"
+    PROGRAMMER_REVIEW_BEFORE="$(get_last_output "$PEER_PROGRAMMER_ID" 2>/dev/null || true)"
     send_input "$PEER_PROGRAMMER_ID" "$PROGRAMMER_REVIEW_MSG"
-    wait_for_terminal "$PEER_PROGRAMMER_ID" 1800
+    wait_for_agent_response "$PEER_PROGRAMMER_ID" "$PROGRAMMER_REVIEW_BEFORE" 1800
     PROGRAMMER_REVIEW_OUT="$(get_last_output "$PEER_PROGRAMMER_ID")"
 
     if is_review_approved "$PROGRAMMER_REVIEW_OUT"; then
@@ -312,8 +348,9 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     "- Key outputs:" \
     "- Failed criteria (if any):" \
     "- Recommended next fix:")"
+  TESTER_BEFORE="$(get_last_output "$TESTER_ID" 2>/dev/null || true)"
   send_input "$TESTER_ID" "$TESTER_MSG"
-  wait_for_terminal "$TESTER_ID" 1800
+  wait_for_agent_response "$TESTER_ID" "$TESTER_BEFORE" 1800
   TEST_OUT="$(get_last_output "$TESTER_ID")"
 
   echo "$TEST_OUT"
