@@ -143,6 +143,32 @@ get_last_output() {
   curl -fsS "$API/terminals/$terminal_id/output?mode=last" | jq -r '.output'
 }
 
+get_structured_output() {
+  local terminal_id="$1"
+  local marker_regex="$2"
+  local full_output line_no
+
+  full_output="$(
+    curl -fsS "$API/terminals/$terminal_id/output?mode=full" | jq -r '.output' \
+      | sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g' \
+      | tr -d '\r'
+  )"
+
+  line_no="$(printf '%s\n' "$full_output" | grep -En "$marker_regex" | tail -n 1 | cut -d: -f1 || true)"
+  if [[ -z "$line_no" ]]; then
+    get_last_output "$terminal_id"
+    return
+  fi
+
+  printf '%s\n' "$full_output" | tail -n +"$line_no" | awk '
+    NR == 1 { print; next }
+    /^[[:space:]]*›[[:space:]]/ { exit }
+    /^[[:space:]]*\?[[:space:]]+for shortcuts/ { exit }
+    /^[[:space:]]*[0-9]+%[[:space:]]+context left[[:space:]]*$/ { exit }
+    { print }
+  '
+}
+
 wait_for_expected_output() {
   local terminal_id="$1"
   local previous_output="$2"
@@ -153,7 +179,7 @@ wait_for_expected_output() {
 
   while true; do
     status="$(get_status "$terminal_id")"
-    current_output="$(get_last_output "$terminal_id" 2>/dev/null || true)"
+    current_output="$(get_structured_output "$terminal_id" "$expected_regex" 2>/dev/null || true)"
 
     if [[ "$status" == "error" ]]; then
       echo "Terminal $terminal_id entered ERROR state" >&2
@@ -245,11 +271,17 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "Task:" \
       "1) Explore the codebase." \
       "2) Create/update all OpenSpec artifacts using ff command." \
-      "3) Return ANALYST_SUMMARY exactly as profile format.")"
+      "3) Return ANALYST_SUMMARY exactly as profile format." \
+      "4) Include mandatory sections in ANALYST_SUMMARY:" \
+      "   - Artifact review per file: proposal.md, design.md, tasks.md, specs/* (PASS|REVISE + evidence)." \
+      "   - P1-P4 traceability: map each scenario requirement to artifact sections." \
+      "   - Phased delivery coverage: phase-by-phase completeness/gaps." \
+      "   - Downstream contract impact: planner/API/converter/revised_document implications." \
+      "   - Explicit handoff: concrete actions for programmer.")"
     ANALYST_BEFORE="$(get_last_output "$ANALYST_ID" 2>/dev/null || true)"
     send_input "$ANALYST_ID" "$ANALYST_MSG"
     wait_for_expected_output "$ANALYST_ID" "$ANALYST_BEFORE" "$ANALYST_SUMMARY_REGEX" 1800
-    ANALYST_OUT="$(get_last_output "$ANALYST_ID")"
+    ANALYST_OUT="$(get_structured_output "$ANALYST_ID" "$ANALYST_SUMMARY_REGEX")"
 
     log "[round $round] peer_system_analyst: cycle $analyst_cycle - reviewing analyst output"
     ANALYST_REVIEW_MSG="$(printf '%s\n' \
@@ -263,12 +295,15 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "peer system analyst: review only, dont do testing, dont implement code" \
       "" \
       "Task:" \
-      "Review analyst output quality and OpenSpec completeness." \
+      "Review analyst output quality and OpenSpec completeness using this checklist:" \
+      "- Has per-artifact review with evidence for proposal/design/tasks/specs." \
+      "- Has P1-P4 traceability and phased coverage." \
+      "- Has downstream contract impact and clear programmer handoff." \
       "Return REVIEW_RESULT: APPROVED or REVIEW_RESULT: REVISE with REVIEW_NOTES.")"
-    ANALYST_REVIEW_BEFORE="$(get_last_output "$PEER_ANALYST_ID" 2>/dev/null || true)"
+    ANALYST_REVIEW_BEFORE="$(get_structured_output "$PEER_ANALYST_ID" "$REVIEW_RESULT_REGEX" 2>/dev/null || true)"
     send_input "$PEER_ANALYST_ID" "$ANALYST_REVIEW_MSG"
     wait_for_expected_output "$PEER_ANALYST_ID" "$ANALYST_REVIEW_BEFORE" "$REVIEW_RESULT_REGEX" 1800
-    ANALYST_REVIEW_OUT="$(get_last_output "$PEER_ANALYST_ID")"
+    ANALYST_REVIEW_OUT="$(get_structured_output "$PEER_ANALYST_ID" "$REVIEW_RESULT_REGEX")"
 
     if is_review_approved "$ANALYST_REVIEW_OUT"; then
       log "[round $round] peer_system_analyst: APPROVED"
@@ -309,10 +344,10 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "1) Apply OpenSpec changes using openspec-apply-change skill." \
       "2) Implement required code changes." \
       "3) Return PROGRAMMER_SUMMARY exactly as profile format.")"
-    PROGRAMMER_BEFORE="$(get_last_output "$PROGRAMMER_ID" 2>/dev/null || true)"
+    PROGRAMMER_BEFORE="$(get_structured_output "$PROGRAMMER_ID" "$PROGRAMMER_SUMMARY_REGEX" 2>/dev/null || true)"
     send_input "$PROGRAMMER_ID" "$PROGRAMMER_MSG"
     wait_for_expected_output "$PROGRAMMER_ID" "$PROGRAMMER_BEFORE" "$PROGRAMMER_SUMMARY_REGEX" 1800
-    PROGRAMMER_OUT="$(get_last_output "$PROGRAMMER_ID")"
+    PROGRAMMER_OUT="$(get_structured_output "$PROGRAMMER_ID" "$PROGRAMMER_SUMMARY_REGEX")"
 
     log "[round $round] peer_programmer: cycle $programmer_cycle - reviewing implementation"
     PROGRAMMER_REVIEW_MSG="$(printf '%s\n' \
@@ -328,10 +363,10 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
       "Task:" \
       "Review implementation completeness and quality." \
       "Return REVIEW_RESULT: APPROVED or REVIEW_RESULT: REVISE with REVIEW_NOTES.")"
-    PROGRAMMER_REVIEW_BEFORE="$(get_last_output "$PEER_PROGRAMMER_ID" 2>/dev/null || true)"
+    PROGRAMMER_REVIEW_BEFORE="$(get_structured_output "$PEER_PROGRAMMER_ID" "$REVIEW_RESULT_REGEX" 2>/dev/null || true)"
     send_input "$PEER_PROGRAMMER_ID" "$PROGRAMMER_REVIEW_MSG"
     wait_for_expected_output "$PEER_PROGRAMMER_ID" "$PROGRAMMER_REVIEW_BEFORE" "$REVIEW_RESULT_REGEX" 1800
-    PROGRAMMER_REVIEW_OUT="$(get_last_output "$PEER_PROGRAMMER_ID")"
+    PROGRAMMER_REVIEW_OUT="$(get_structured_output "$PEER_PROGRAMMER_ID" "$REVIEW_RESULT_REGEX")"
 
     if is_review_approved "$PROGRAMMER_REVIEW_OUT"; then
       log "[round $round] peer_programmer: APPROVED"
@@ -368,10 +403,10 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     "- Key outputs:" \
     "- Failed criteria (if any):" \
     "- Recommended next fix:")"
-  TESTER_BEFORE="$(get_last_output "$TESTER_ID" 2>/dev/null || true)"
+  TESTER_BEFORE="$(get_structured_output "$TESTER_ID" "$TEST_RESULT_REGEX" 2>/dev/null || true)"
   send_input "$TESTER_ID" "$TESTER_MSG"
   wait_for_expected_output "$TESTER_ID" "$TESTER_BEFORE" "$TEST_RESULT_REGEX" 1800
-  TEST_OUT="$(get_last_output "$TESTER_ID")"
+  TEST_OUT="$(get_structured_output "$TESTER_ID" "$TEST_RESULT_REGEX")"
 
   echo "$TEST_OUT"
 
