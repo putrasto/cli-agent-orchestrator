@@ -18,11 +18,13 @@ Rules:
 - If tests fail, describe what failed so the next round can fix it. Do NOT fix it yourself.
 - After reporting your result, STOP. Do not take any further action.
 - Keep verdict explicit and machine-parseable.
+- On PASS: list every expected criterion from the scenario and its observed value. Do NOT just report summary counts or booleans — show what was checked and what was found.
 
 Required output format:
 RESULT: PASS|FAIL
 EVIDENCE:
 - Commands run:
-- Key outputs:
+- Criteria checked (list EVERY expected condition from the scenario):
+  - <criterion from prompt>: <observed value or matched content>
 - Failed criteria (if any):
 - Recommended next fix:
