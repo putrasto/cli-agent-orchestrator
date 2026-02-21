@@ -127,7 +127,7 @@ Environment variables > JSON config file > hardcoded defaults. Empty env vars ar
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RESUME` | `0` | Set `1` to force resume from state file |
-| `STATE_FILE` | `.tmp/codex-3agents-loop-state.json` | Path to state file |
+| `STATE_FILE` | `.tmp/agnostic-3agents-loop-state.json` | Path to state file |
 
 Auto-resume: if a state file exists with `final_status=RUNNING`, the orchestrator resumes automatically without needing `RESUME=1`.
 
@@ -172,7 +172,7 @@ python examples/agnostic-3agents/run_orchestrator_loop.py config-fresh.json
 To force a fresh start after interruption:
 
 ```bash
-rm /path/to/project/.tmp/codex-3agents-loop-state.json
+rm /path/to/project/.tmp/agnostic-3agents-loop-state.json
 ```
 
 ### Non-strict mode (fallback to terminal output)

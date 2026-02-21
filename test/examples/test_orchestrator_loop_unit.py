@@ -1219,6 +1219,7 @@ class TestLoadConfig:
         assert cfg["POLL_SECONDS"] == 2
         assert cfg["MIN_REVIEW_CYCLES_BEFORE_APPROVAL"] == 2
         assert cfg["REVIEW_EVIDENCE_MIN_MATCH"] == 3
+        assert cfg["STATE_FILE"].endswith(".tmp/agnostic-3agents-loop-state.json")
 
     def test_nested_condensation_mapping(self, tmp_path):
         cfg_file = tmp_path / "config.json"

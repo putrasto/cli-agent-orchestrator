@@ -73,7 +73,7 @@ Key layers:
 
 ## State file format (orchestrator loop)
 
-The orchestrator loop persists state to `.tmp/codex-3agents-loop-state.json` with `version: 1`. The Python orchestrator stores per-agent provider info in terminals (dict format). Old plain-string state files are read with backward compatibility but new state files are not guaranteed to be readable by the former shell orchestrator.
+The orchestrator loop persists state to `.tmp/agnostic-3agents-loop-state.json` with `version: 1`. The Python orchestrator stores per-agent provider info in terminals (dict format). Old plain-string state files are read with backward compatibility but new state files are not guaranteed to be readable by the former shell orchestrator.
 
 ## Important env vars (orchestrator loop)
 

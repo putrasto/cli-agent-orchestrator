@@ -147,7 +147,7 @@ def load_config(argv: list[str] | None = None) -> dict:
 
     # Compute STATE_FILE default if not set
     if not cfg["STATE_FILE"]:
-        cfg["STATE_FILE"] = str(Path(cfg["WD"]) / ".tmp" / "codex-3agents-loop-state.json")
+        cfg["STATE_FILE"] = str(Path(cfg["WD"]) / ".tmp" / "agnostic-3agents-loop-state.json")
 
     # Validate top-level provider early (fail-fast before agent merge)
     top_provider = cfg["PROVIDER"]
