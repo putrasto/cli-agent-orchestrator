@@ -122,10 +122,10 @@ class TestIsReviewApproved:
         review = textwrap.dedent("""\
             REVIEW_RESULT: APPROVED
             REVIEW_NOTES:
-            - The artifact proposal is well-structured with clear tasks.
-            - P1 and P2 traceability looks good, phased delivery complete.
-            - Downstream contract impact on planner and API documented.
-            - Handoff is actionable with concrete next steps.
+            - proposal verified as complete with correct tasks.
+            - P1 traceability confirmed across all phases.
+            - downstream contract references api_service.py module.
+            - handoff includes 3 concrete action items for programmer.
         """)
         assert orch.is_review_approved(review, 2, "analyst") is True
 
@@ -148,10 +148,10 @@ class TestIsReviewApproved:
         review = textwrap.dedent("""\
             REVIEW_RESULT: APPROVED
             REVIEW_NOTES:
-            - artifact proposal design tasks spec
-            - P1 P2 traceability phase
-            - downstream contract planner api
-            - handoff actionable concrete next step
+            - proposal verified as complete.
+            - P1 traceability confirmed across phases.
+            - downstream contract references api_service.py module.
+            - handoff includes 3 concrete action items.
         """)
         assert orch.is_review_approved(review, 1, "analyst") is False
 
@@ -163,9 +163,19 @@ class TestIsReviewApproved:
         review = textwrap.dedent("""\
             REVIEW_RESULT: APPROVED
             REVIEW_NOTES:
-            - artifact looks fine
+            - proposal verified as complete.
         """)
         # Only 1 evidence pattern match, need 3
+        assert orch.is_review_approved(review, 2, "analyst") is False
+
+    def test_rejected_trivial_review_with_domain_words_only(self):
+        """Domain keywords without assessment co-occurrence should fail."""
+        review = textwrap.dedent("""\
+            REVIEW_RESULT: APPROVED
+            REVIEW_NOTES:
+            - Looks good, artifacts and downstream handoff are fine.
+            - P1 and traceability covered. Scope is clear.
+        """)
         assert orch.is_review_approved(review, 2, "analyst") is False
 
     def test_approved_without_evidence_when_disabled(self):
@@ -312,6 +322,13 @@ class TestPromptBuilders:
         assert "REVIEW_RESULT" in prompt
         assert "RESPONSE FILE INSTRUCTION" in prompt
         assert "analyst_review.md" in prompt
+        # Hardened checklist
+        assert "default stance is REVISE" in prompt
+        assert "Rejection criteria" in prompt
+        assert "Codebase verification" in prompt
+        assert "Implementation notes" in prompt
+        assert "Risks" in prompt
+        assert "Downstream impact" in prompt
 
     def test_programmer_prompt_has_required_parts(self):
         analyst_out = (

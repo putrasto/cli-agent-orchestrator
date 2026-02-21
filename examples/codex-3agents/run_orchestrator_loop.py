@@ -229,10 +229,14 @@ def send_and_wait(terminal_id: str, role: str, message: str) -> str:
 # ── 6. Review / approval logic ─────────────────────────────────────────────
 
 ANALYST_EVIDENCE_PATTERNS = [
-    re.compile(r"artifact|proposal|design|tasks|spec", re.IGNORECASE),
-    re.compile(r"P1|P2|P3|P4|traceability|phase", re.IGNORECASE),
-    re.compile(r"downstream|contract|planner|api|converter|revised_document", re.IGNORECASE),
-    re.compile(r"handoff|actionable|concrete|next[\s\-]?step", re.IGNORECASE),
+    # Artifact/spec term + verdict (e.g., "proposal verified", "spec incomplete")
+    re.compile(r"(artifact|proposal|design|tasks|spec)\w*\s.{0,30}(verified|missing|incomplete|correct|present|created|updated)", re.IGNORECASE),
+    # Priority/traceability + coverage language (e.g., "P1 coverage gap", "traceability confirmed")
+    re.compile(r"(P[1-4]|traceability|phase)\w*\s.{0,30}(coverage|gap|confirmed|traced|missing|complete)", re.IGNORECASE),
+    # Downstream/contract + specific module or file reference
+    re.compile(r"(downstream|contract)\w*\s.{0,40}(\w+\.\w{2,4}|module|service|component|endpoint)", re.IGNORECASE),
+    # Handoff + concrete next-step language
+    re.compile(r"(handoff|action\s?item)\w*\s.{0,30}(\d+\s*(action|step|item|concrete)|includes|contains|lists)", re.IGNORECASE),
 ]
 
 PROGRAMMER_EVIDENCE_PATTERNS = [
@@ -434,12 +438,18 @@ def build_analyst_review_prompt(analyst_out: str) -> str:
         "Guard lines:",
         "peer system analyst: review only, dont do testing, dont implement code",
         "",
-        "Task:",
-        "Review analyst output quality and OpenSpec completeness using this checklist:",
-        "- Has per-artifact review with evidence for proposal/design/tasks/specs.",
-        "- Has P1-P4 traceability and phased coverage.",
-        "- Has downstream contract impact and clear programmer handoff.",
-        "Return REVIEW_RESULT: APPROVED or REVIEW_RESULT: REVISE with REVIEW_NOTES.",
+        "Task: Your default stance is REVISE. Only approve when ALL criteria below pass.",
+        "",
+        "Rejection criteria — REVISE if ANY fail:",
+        "1. Scope: must reference specific file paths or module names. Reject if vague.",
+        "2. OpenSpec artifacts: must list artifact filenames (proposal.md, design.md, etc). Reject if none listed.",
+        "3. Implementation notes: must contain at least 3 concrete action items. Reject if vague or fewer than 3.",
+        "4. Risks/assumptions: must not be 'none' or single-line without mitigation. Reject if missing or unmitigated.",
+        "5. Downstream impact: must not be 'N/A' or missing. Reject if absent.",
+        "",
+        "Codebase verification: pick at least 2 file paths from the analyst output and verify they exist using ls. Report what you checked.",
+        "",
+        "Return REVIEW_RESULT: APPROVED or REVIEW_RESULT: REVISE with REVIEW_NOTES covering each criterion.",
         response_file_instruction("analyst_review"),
     ]
     return "\n".join(parts)
