@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
+import httpx
 import pytest
 
 # Add the examples directory so we can import the module
@@ -604,8 +605,8 @@ class TestStateManagement:
         finally:
             orch.STATE_FILE = original_state_file
 
-    def test_state_json_format_compatible_with_shell(self, tmp_path):
-        """Verify the JSON structure matches the shell script format."""
+    def test_state_json_format_with_per_agent_provider(self, tmp_path):
+        """Verify the JSON structure includes per-agent provider info."""
         state_file = str(tmp_path / "state.json")
         original_state_file = orch.STATE_FILE
         try:
@@ -627,11 +628,13 @@ class TestStateManagement:
             assert data["version"] == 1
             assert "updated_at" in data
             assert data["session_name"] == "cao-abcdef12"
-            assert data["terminals"]["analyst"] == "11111111"
-            assert data["terminals"]["peer_analyst"] == "22222222"
-            assert data["terminals"]["programmer"] == "33333333"
-            assert data["terminals"]["peer_programmer"] == "44444444"
-            assert data["terminals"]["tester"] == "55555555"
+            # Terminals now stored as {"id": ..., "provider": ...}
+            assert data["terminals"]["analyst"]["id"] == "11111111"
+            assert data["terminals"]["analyst"]["provider"] == orch.AGENT_CONFIG["analyst"]["provider"]
+            assert data["terminals"]["peer_analyst"]["id"] == "22222222"
+            assert data["terminals"]["programmer"]["id"] == "33333333"
+            assert data["terminals"]["peer_programmer"]["id"] == "44444444"
+            assert data["terminals"]["tester"]["id"] == "55555555"
             assert data["current_round"] == 1
             assert data["current_phase"] == "analyst"
             assert data["final_status"] == "RUNNING"
@@ -1041,12 +1044,19 @@ class TestMainAutoResumeIntegration:
     @patch("run_orchestrator_loop.verify_resume_terminals")
     @patch("run_orchestrator_loop.load_state")
     @patch("run_orchestrator_loop.should_auto_resume", return_value=True)
+    @patch("run_orchestrator_loop.load_config")
+    @patch("run_orchestrator_loop._apply_config")
+    @patch("run_orchestrator_loop.ApiClient")
     def test_main_auto_resumes_without_prompt_env(
-        self, mock_auto, mock_load, mock_verify, tmp_path
+        self, mock_api_cls, mock_apply, mock_load_cfg, mock_auto, mock_load, mock_verify, tmp_path
     ):
         """RESUME=0, no PROMPT, but state file is RUNNING → main() loads
         prompt from state and enters resume path."""
         state_file = self._make_state(tmp_path, "RUNNING", "done")
+
+        # load_config returns a dummy config (main() applies it)
+        mock_load_cfg.return_value = {}
+        mock_api_cls.return_value = orch.api  # keep existing api mock
 
         # load_state returns True and populates globals from state
         def fake_load():
@@ -1085,10 +1095,16 @@ class TestMainAutoResumeIntegration:
             orch.PROMPT = orig_prompt
             orch.PROMPT_FILE = orig_prompt_file
 
-    def test_main_exits_on_empty_prompt_when_no_auto_resume(self, tmp_path):
+    @patch("run_orchestrator_loop.load_config", return_value={})
+    @patch("run_orchestrator_loop._apply_config")
+    @patch("run_orchestrator_loop.ApiClient")
+    def test_main_exits_on_empty_prompt_when_no_auto_resume(
+        self, mock_api_cls, mock_apply, mock_load_cfg, tmp_path
+    ):
         """RESUME=0, no PROMPT, state file has PASS → no auto-resume →
         exits with 'PROMPT is empty' error."""
         state_file = self._make_state(tmp_path, "PASS", "done")
+        mock_api_cls.return_value = orch.api
 
         orig_state = orch.STATE_FILE
         orig_resume = orch.RESUME
@@ -1108,3 +1124,746 @@ class TestMainAutoResumeIntegration:
             orch.RESUME = orig_resume
             orch.PROMPT = orig_prompt
             orch.PROMPT_FILE = orig_prompt_file
+
+
+# ── JSON config loading (tasks 1.4) ─────────────────────────────────────────
+
+
+class TestLoadConfig:
+    def test_json_overrides_default(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"limits": {"max_rounds": 3}}))
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["MAX_ROUNDS"] == 3
+
+    def test_env_var_overrides_json(self, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"limits": {"max_rounds": 3}}))
+        monkeypatch.setenv("MAX_ROUNDS", "5")
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["MAX_ROUNDS"] == 5
+
+    def test_empty_env_var_treated_as_unset(self, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"limits": {"max_rounds": 3}}))
+        monkeypatch.setenv("MAX_ROUNDS", "")
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["MAX_ROUNDS"] == 3
+
+    def test_empty_env_var_on_boolean_treated_as_unset(self, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"cleanup_on_exit": True}))
+        monkeypatch.setenv("CLEANUP_ON_EXIT", "")
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["CLEANUP_ON_EXIT"] is True
+
+    def test_missing_file_exits_with_error(self, tmp_path):
+        with pytest.raises(SystemExit) as exc_info:
+            orch.load_config(argv=["prog", str(tmp_path / "missing.json")])
+        assert exc_info.value.code == 1
+
+    def test_invalid_json_exits_with_error(self, tmp_path):
+        cfg_file = tmp_path / "bad.json"
+        cfg_file.write_text("not valid json {{{")
+        with pytest.raises(SystemExit) as exc_info:
+            orch.load_config(argv=["prog", str(cfg_file)])
+        assert exc_info.value.code == 1
+
+    def test_unknown_top_level_key_fatal(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"descripion": "typo", "limits": {"max_rounds": 3}}))
+        with pytest.raises(SystemExit) as exc_info:
+            orch.load_config(argv=["prog", str(cfg_file)])
+        assert exc_info.value.code == 1
+
+    def test_unknown_agent_role_fatal(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"agents": {"peer_anlyst": {"provider": "codex"}}}))
+        with pytest.raises(SystemExit) as exc_info:
+            orch.load_config(argv=["prog", str(cfg_file)])
+        assert exc_info.value.code == 1
+
+    def test_invalid_per_agent_provider_fatal(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"agents": {"analyst": {"provider": "gpt4"}}}))
+        with pytest.raises(SystemExit) as exc_info:
+            orch.load_config(argv=["prog", str(cfg_file)])
+        assert exc_info.value.code == 1
+
+    def test_invalid_top_level_provider_fatal(self, tmp_path):
+        """Top-level provider validated even when all agents override it."""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({
+            "provider": "bad_provider",
+            "agents": {
+                "analyst": {"provider": "codex"},
+                "peer_analyst": {"provider": "codex"},
+                "programmer": {"provider": "codex"},
+                "peer_programmer": {"provider": "codex"},
+                "tester": {"provider": "codex"},
+            },
+        }))
+        with pytest.raises(SystemExit) as exc_info:
+            orch.load_config(argv=["prog", str(cfg_file)])
+        assert exc_info.value.code == 1
+
+    def test_no_config_file_uses_env_only(self, monkeypatch):
+        monkeypatch.setenv("MAX_ROUNDS", "5")
+        cfg = orch.load_config(argv=["prog"])
+        assert cfg["MAX_ROUNDS"] == 5
+
+    def test_default_config_values(self):
+        cfg = orch.load_config(argv=["prog"])
+        assert cfg["MAX_ROUNDS"] == 8
+        assert cfg["MAX_REVIEW_CYCLES"] == 3
+        assert cfg["POLL_SECONDS"] == 2
+        assert cfg["MIN_REVIEW_CYCLES_BEFORE_APPROVAL"] == 2
+        assert cfg["REVIEW_EVIDENCE_MIN_MATCH"] == 3
+
+    def test_nested_condensation_mapping(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({
+            "condensation": {"condense_cross_phase": False, "max_cross_phase_lines": 20}
+        }))
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["CONDENSE_CROSS_PHASE"] is False
+        assert cfg["MAX_CROSS_PHASE_LINES"] == 20
+
+    def test_nested_handoff_mapping(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({
+            "handoff": {"strict_file_handoff": False, "idle_grace_seconds": 60}
+        }))
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["STRICT_FILE_HANDOFF"] is False
+        assert cfg["IDLE_GRACE_SECONDS"] == 60
+
+
+# ── Per-agent provider (tasks 2.4) ──────────────────────────────────────────
+
+
+class TestAgentConfig:
+    def test_mixed_providers_in_agent_config(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({
+            "agents": {
+                "analyst": {"provider": "claude_code"},
+                "peer_analyst": {"provider": "codex"},
+            }
+        }))
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        ac = cfg["_agent_config"]
+        assert ac["analyst"]["provider"] == "claude_code"
+        assert ac["peer_analyst"]["provider"] == "codex"
+
+    def test_missing_agent_provider_inherits_top_level(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({
+            "provider": "claude_code",
+            "agents": {"analyst": {"profile": "custom_analyst"}}
+        }))
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        ac = cfg["_agent_config"]
+        assert ac["analyst"]["provider"] == "claude_code"
+        assert ac["analyst"]["profile"] == "custom_analyst"
+
+    def test_missing_profile_uses_role_default(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({
+            "agents": {"analyst": {"provider": "codex"}}
+        }))
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        ac = cfg["_agent_config"]
+        assert ac["analyst"]["profile"] == "system_analyst"
+
+    def test_agents_section_omitted_uses_all_defaults(self):
+        cfg = orch.load_config(argv=["prog"])
+        ac = cfg["_agent_config"]
+        assert ac["analyst"]["profile"] == "system_analyst"
+        assert ac["peer_analyst"]["profile"] == "peer_system_analyst"
+        assert ac["programmer"]["profile"] == "programmer"
+        assert ac["peer_programmer"]["profile"] == "peer_programmer"
+        assert ac["tester"]["profile"] == "tester"
+        for role in ac:
+            assert ac[role]["provider"] == "codex"
+
+
+# ── Terminal rename (tasks 3.3) ─────────────────────────────────────────────
+
+
+class TestRenameTerminal:
+    @patch.object(orch.api, "get_status", return_value="idle")
+    @patch.object(orch.api, "send_input")
+    def test_rename_sent_with_correct_format(self, mock_send, mock_status):
+        orch._rename_terminal("da33cf00", "analyst")
+        mock_send.assert_called_once_with("da33cf00", "/rename analyst-da33cf00")
+
+    @patch.object(orch.api, "get_status", return_value="idle")
+    @patch.object(orch.api, "send_input")
+    def test_rename_peer_analyst_underscore_format(self, mock_send, mock_status):
+        orch._rename_terminal("fae0481d", "peer_analyst")
+        mock_send.assert_called_once_with("fae0481d", "/rename peer_analyst-fae0481d")
+
+    @patch.object(orch.api, "send_input", side_effect=Exception("connection error"))
+    def test_rename_failure_is_non_fatal(self, mock_send):
+        # Should not raise
+        orch._rename_terminal("da33cf00", "analyst")
+
+    @patch.object(orch.api, "get_status", return_value="processing")
+    @patch.object(orch.api, "send_input")
+    @patch("run_orchestrator_loop.time")
+    def test_rename_timeout_is_non_fatal(self, mock_time, mock_send, mock_status):
+        mock_time.monotonic.side_effect = [0.0, 6.0]
+        mock_time.sleep = MagicMock()
+        # Should not raise
+        orch._rename_terminal("da33cf00", "analyst")
+
+
+# ── Partial creation cleanup (tasks 4.2) ────────────────────────────────────
+
+
+class TestPartialCreationCleanup:
+    @patch.object(orch.api, "exit_terminal")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status", return_value="idle")
+    @patch.object(orch.api, "create_terminal")
+    @patch.object(orch.api, "create_session")
+    def test_cleanup_on_third_terminal_failure(
+        self, mock_session, mock_terminal, mock_status, mock_send, mock_exit
+    ):
+        mock_session.return_value = {"id": "t1", "session_name": "cao-test"}
+        mock_terminal.side_effect = [
+            {"id": "t2"},
+            Exception("creation failed"),
+        ]
+
+        with pytest.raises(SystemExit) as exc_info:
+            orch.init_new_run()
+        assert exc_info.value.code == 1
+
+        exit_calls = [c[0][0] for c in mock_exit.call_args_list]
+        assert "t1" in exit_calls
+        assert "t2" in exit_calls
+
+
+# ── Explore-before-ff on retry (tasks 5.2) ──────────────────────────────────
+
+
+class TestExploreBeforeFf:
+    def setup_method(self):
+        orch._explore_sent.clear()
+        orch.EXPLORE_SUMMARY = "Explore summary text."
+        orch.terminal_ids.update({
+            "analyst": "a001", "peer_analyst": "a002",
+            "programmer": "p001", "peer_programmer": "p002", "tester": "t001",
+        })
+        orch.feedback = "RESULT: FAIL\nTests failed."
+        orch.analyst_feedback = "None yet."
+
+    def test_round_1_has_explore_codebase(self):
+        prompt = orch.build_analyst_prompt(1, 1)
+        assert "Explore the codebase" in prompt
+        assert "fast-forward skill" in prompt
+
+    def test_round_2_has_explore_skill_investigate(self):
+        prompt = orch.build_analyst_prompt(2, 1)
+        assert "explore skill to investigate the test failure" in prompt
+        assert "fast-forward skill to update" in prompt
+        assert "Explore the codebase" not in prompt
+
+
+# ── State file per-agent provider (tasks 6.4) ───────────────────────────────
+
+
+class TestStateFilePerAgentProvider:
+    def test_state_roundtrip_with_mixed_providers(self, tmp_path):
+        state_file = str(tmp_path / "state.json")
+        orig_state = orch.STATE_FILE
+        orig_agent = orch.AGENT_CONFIG.copy()
+        try:
+            orch.STATE_FILE = state_file
+            orch.AGENT_CONFIG = {
+                "analyst": {"provider": "claude_code", "profile": "system_analyst"},
+                "peer_analyst": {"provider": "codex", "profile": "peer_system_analyst"},
+                "programmer": {"provider": "claude_code", "profile": "programmer"},
+                "peer_programmer": {"provider": "codex", "profile": "peer_programmer"},
+                "tester": {"provider": "codex", "profile": "tester"},
+            }
+            orch.terminal_ids.update({
+                "analyst": "aa11", "peer_analyst": "bb22",
+                "programmer": "cc33", "peer_programmer": "dd44", "tester": "ee55",
+            })
+            orch.save_state()
+
+            data = json.loads(Path(state_file).read_text())
+            assert data["terminals"]["analyst"] == {"id": "aa11", "provider": "claude_code"}
+            assert data["terminals"]["peer_analyst"] == {"id": "bb22", "provider": "codex"}
+
+            for k in orch.terminal_ids:
+                orch.terminal_ids[k] = ""
+            orch.load_state()
+            assert orch.terminal_ids["analyst"] == "aa11"
+            assert orch.terminal_ids["peer_analyst"] == "bb22"
+        finally:
+            orch.STATE_FILE = orig_state
+            orch.AGENT_CONFIG = orig_agent
+
+    def test_old_format_state_file_loads_correctly(self, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text(json.dumps({
+            "version": 1,
+            "provider": "codex",
+            "session_name": "cao-old",
+            "current_round": 2,
+            "current_phase": "programmer",
+            "final_status": "RUNNING",
+            "terminals": {
+                "analyst": "da33cf00",
+                "peer_analyst": "fae0481d",
+                "programmer": "abc12345",
+                "peer_programmer": "def67890",
+                "tester": "99887766",
+            },
+            "feedback": "test feedback",
+            "analyst_feedback": "",
+            "programmer_feedback": "",
+            "outputs": {},
+        }))
+        orig_state = orch.STATE_FILE
+        try:
+            orch.STATE_FILE = str(state_file)
+            assert orch.load_state() is True
+            assert orch.terminal_ids["analyst"] == "da33cf00"
+            assert orch.terminal_ids["peer_analyst"] == "fae0481d"
+        finally:
+            orch.STATE_FILE = orig_state
+
+    @patch.object(orch.api, "get_status", return_value="idle")
+    def test_old_format_provider_mismatch_detected(self, mock_status, tmp_path, capsys):
+        """Old-format terminals are normalized with state-level provider,
+        so verify_resume_terminals can detect provider mismatches."""
+        state_file = tmp_path / "state.json"
+        state_file.write_text(json.dumps({
+            "version": 1,
+            "provider": "codex",
+            "terminals": {
+                "analyst": "da33cf00",
+                "peer_analyst": "fae0481d",
+                "programmer": "abc12345",
+                "peer_programmer": "def67890",
+                "tester": "99887766",
+            },
+        }))
+        orig_state = orch.STATE_FILE
+        orig_agent = orch.AGENT_CONFIG.copy()
+        try:
+            orch.STATE_FILE = str(state_file)
+            # Load normalizes old strings to {"id": ..., "provider": "codex"}
+            assert orch.load_state() is True
+            # Change analyst config to a different provider
+            orch.AGENT_CONFIG["analyst"] = {"provider": "claude_code", "profile": "system_analyst"}
+            orch.verify_resume_terminals()
+            captured = capsys.readouterr()
+            assert "provider mismatch" in captured.out
+            assert "analyst" in captured.out
+        finally:
+            orch.STATE_FILE = orig_state
+            orch.AGENT_CONFIG = orig_agent
+
+    @patch.object(orch.api, "get_status")
+    def test_unreachable_terminal_on_resume_exits(self, mock_status, tmp_path):
+        terminals_data = {
+            "analyst": {"id": "t1", "provider": "codex"},
+            "peer_analyst": {"id": "t2", "provider": "codex"},
+            "programmer": {"id": "t3", "provider": "codex"},
+            "peer_programmer": {"id": "t4", "provider": "codex"},
+            "tester": {"id": "t5", "provider": "codex"},
+        }
+        orig_loaded = orch._loaded_state_terminals
+        try:
+            orch._loaded_state_terminals = terminals_data
+            orch.terminal_ids.update({
+                "analyst": "t1", "peer_analyst": "t2", "programmer": "t3",
+                "peer_programmer": "t4", "tester": "t5",
+            })
+            mock_status.side_effect = httpx.HTTPError("unreachable")
+            with pytest.raises(SystemExit) as exc_info:
+                orch.verify_resume_terminals()
+            assert exc_info.value.code == 1
+        finally:
+            orch._loaded_state_terminals = orig_loaded
+
+    @patch.object(orch.api, "get_status", return_value="idle")
+    def test_provider_mismatch_on_resume_logs_warning(self, mock_status, tmp_path, capsys):
+        terminals_data = {
+            "analyst": {"id": "t1", "provider": "codex"},
+            "peer_analyst": {"id": "t2", "provider": "codex"},
+            "programmer": {"id": "t3", "provider": "codex"},
+            "peer_programmer": {"id": "t4", "provider": "codex"},
+            "tester": {"id": "t5", "provider": "codex"},
+        }
+        orig_loaded = orch._loaded_state_terminals
+        orig_agent = orch.AGENT_CONFIG.copy()
+        try:
+            orch._loaded_state_terminals = terminals_data
+            orch.terminal_ids.update({
+                "analyst": "t1", "peer_analyst": "t2", "programmer": "t3",
+                "peer_programmer": "t4", "tester": "t5",
+            })
+            orch.AGENT_CONFIG["analyst"] = {"provider": "claude_code", "profile": "system_analyst"}
+            orch.verify_resume_terminals()
+            captured = capsys.readouterr()
+            assert "provider mismatch" in captured.out
+            assert "analyst" in captured.out
+        finally:
+            orch._loaded_state_terminals = orig_loaded
+            orch.AGENT_CONFIG = orig_agent
+
+
+# ── Start agent selection (tasks 7.5) ────────────────────────────────────────
+
+
+class TestStartAgentSelection:
+    """Tests for START_AGENT feature (tasks 7.1-7.5)."""
+
+    # ── Config tests ──
+
+    def test_default_start_agent_is_analyst(self):
+        cfg = orch.load_config(argv=["prog"])
+        assert cfg["START_AGENT"] == "analyst"
+
+    def test_start_agent_from_json(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"start_agent": "tester"}))
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["START_AGENT"] == "tester"
+
+    def test_start_agent_env_overrides_json(self, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"start_agent": "tester"}))
+        monkeypatch.setenv("START_AGENT", "programmer")
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["START_AGENT"] == "programmer"
+
+    def test_invalid_start_agent_exits(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"start_agent": "invalid_role"}))
+        with pytest.raises(SystemExit) as exc_info:
+            orch.load_config(argv=["prog", str(cfg_file)])
+        assert exc_info.value.code == 1
+
+    # ── init_new_run phase mapping tests ──
+
+    def _mock_init_apis(self, mock_session, mock_terminal):
+        mock_session.return_value = {"id": "t1", "session_name": "cao-test"}
+        mock_terminal.side_effect = [{"id": f"t{i}"} for i in range(2, 6)]
+
+    @patch("run_orchestrator_loop._rename_terminal")
+    @patch.object(orch.api, "get_status", return_value="idle")
+    @patch.object(orch.api, "create_terminal")
+    @patch.object(orch.api, "create_session")
+    def test_init_default_starts_at_analyst_phase(
+        self, mock_session, mock_terminal, mock_status, mock_rename, tmp_path
+    ):
+        self._mock_init_apis(mock_session, mock_terminal)
+        orig = (orch.START_AGENT, orch.STATE_FILE, orch._start_at_peer)
+        try:
+            orch.START_AGENT = "analyst"
+            orch.STATE_FILE = str(tmp_path / "state.json")
+            orch.init_new_run()
+            assert orch.current_phase == orch.PHASE_ANALYST
+            assert orch.outputs["analyst"] == ""
+            assert orch.outputs["programmer"] == ""
+            assert orch._start_at_peer is False
+        finally:
+            orch.START_AGENT, orch.STATE_FILE, orch._start_at_peer = orig
+
+    @patch("run_orchestrator_loop._rename_terminal")
+    @patch.object(orch.api, "get_status", return_value="idle")
+    @patch.object(orch.api, "create_terminal")
+    @patch.object(orch.api, "create_session")
+    def test_init_start_at_peer_analyst(
+        self, mock_session, mock_terminal, mock_status, mock_rename, tmp_path
+    ):
+        self._mock_init_apis(mock_session, mock_terminal)
+        orig = (orch.START_AGENT, orch.STATE_FILE, orch._start_at_peer)
+        try:
+            orch.START_AGENT = "peer_analyst"
+            orch.STATE_FILE = str(tmp_path / "state.json")
+            orch.init_new_run()
+            assert orch.current_phase == orch.PHASE_ANALYST
+            assert orch.outputs["analyst"] == orch._UPSTREAM_PLACEHOLDER
+            assert orch._start_at_peer is True
+        finally:
+            orch.START_AGENT, orch.STATE_FILE, orch._start_at_peer = orig
+
+    @patch("run_orchestrator_loop._rename_terminal")
+    @patch.object(orch.api, "get_status", return_value="idle")
+    @patch.object(orch.api, "create_terminal")
+    @patch.object(orch.api, "create_session")
+    def test_init_start_at_programmer(
+        self, mock_session, mock_terminal, mock_status, mock_rename, tmp_path
+    ):
+        self._mock_init_apis(mock_session, mock_terminal)
+        orig = (orch.START_AGENT, orch.STATE_FILE, orch._start_at_peer)
+        try:
+            orch.START_AGENT = "programmer"
+            orch.STATE_FILE = str(tmp_path / "state.json")
+            orch.init_new_run()
+            assert orch.current_phase == orch.PHASE_PROGRAMMER
+            assert orch.outputs["analyst"] == orch._UPSTREAM_PLACEHOLDER
+            assert orch.outputs["programmer"] == ""
+            assert orch._start_at_peer is False
+        finally:
+            orch.START_AGENT, orch.STATE_FILE, orch._start_at_peer = orig
+
+    @patch("run_orchestrator_loop._rename_terminal")
+    @patch.object(orch.api, "get_status", return_value="idle")
+    @patch.object(orch.api, "create_terminal")
+    @patch.object(orch.api, "create_session")
+    def test_init_start_at_peer_programmer(
+        self, mock_session, mock_terminal, mock_status, mock_rename, tmp_path
+    ):
+        self._mock_init_apis(mock_session, mock_terminal)
+        orig = (orch.START_AGENT, orch.STATE_FILE, orch._start_at_peer)
+        try:
+            orch.START_AGENT = "peer_programmer"
+            orch.STATE_FILE = str(tmp_path / "state.json")
+            orch.init_new_run()
+            assert orch.current_phase == orch.PHASE_PROGRAMMER
+            assert orch.outputs["analyst"] == orch._UPSTREAM_PLACEHOLDER
+            assert orch.outputs["programmer"] == orch._UPSTREAM_PLACEHOLDER
+            assert orch._start_at_peer is True
+        finally:
+            orch.START_AGENT, orch.STATE_FILE, orch._start_at_peer = orig
+
+    @patch("run_orchestrator_loop._rename_terminal")
+    @patch.object(orch.api, "get_status", return_value="idle")
+    @patch.object(orch.api, "create_terminal")
+    @patch.object(orch.api, "create_session")
+    def test_init_start_at_tester(
+        self, mock_session, mock_terminal, mock_status, mock_rename, tmp_path
+    ):
+        self._mock_init_apis(mock_session, mock_terminal)
+        orig = (orch.START_AGENT, orch.STATE_FILE, orch._start_at_peer)
+        try:
+            orch.START_AGENT = "tester"
+            orch.STATE_FILE = str(tmp_path / "state.json")
+            orch.init_new_run()
+            assert orch.current_phase == orch.PHASE_TESTER
+            assert orch.outputs["programmer"] == orch._UPSTREAM_PLACEHOLDER
+            assert orch._start_at_peer is False
+        finally:
+            orch.START_AGENT, orch.STATE_FILE, orch._start_at_peer = orig
+
+    # ── Resume ignores START_AGENT ──
+
+    def test_resume_ignores_start_agent(self, tmp_path):
+        """Resume uses current_phase from state file, not START_AGENT."""
+        state_file = tmp_path / "state.json"
+        state_file.write_text(json.dumps({
+            "version": 1,
+            "session_name": "cao-resume",
+            "current_round": 2,
+            "current_phase": "analyst",
+            "final_status": "RUNNING",
+            "terminals": {
+                "analyst": {"id": "a1", "provider": "codex"},
+                "peer_analyst": {"id": "a2", "provider": "codex"},
+                "programmer": {"id": "p1", "provider": "codex"},
+                "peer_programmer": {"id": "p2", "provider": "codex"},
+                "tester": {"id": "t1", "provider": "codex"},
+            },
+            "feedback": "test feedback",
+            "analyst_feedback": "",
+            "programmer_feedback": "",
+            "outputs": {},
+        }))
+        orig = (orch.STATE_FILE, orch.START_AGENT, orch._start_at_peer)
+        try:
+            orch.STATE_FILE = str(state_file)
+            orch.START_AGENT = "tester"  # Should be ignored on resume
+            orch._start_at_peer = False
+            assert orch.load_state() is True
+            # Phase comes from state file, not START_AGENT
+            assert orch.current_phase == orch.PHASE_ANALYST
+            # _start_at_peer remains False (load_state doesn't touch it)
+            assert orch._start_at_peer is False
+        finally:
+            orch.STATE_FILE, orch.START_AGENT, orch._start_at_peer = orig
+
+    # ── Peer first-dispatch behavior (integration tests) ──
+
+    def _save_globals(self):
+        """Save module globals that main loop tests modify."""
+        keys = [
+            "START_AGENT", "MAX_ROUNDS", "MAX_REVIEW_CYCLES",
+            "MIN_REVIEW_CYCLES_BEFORE_APPROVAL", "PROMPT", "PROMPT_FILE",
+            "RESUME", "STATE_FILE", "_start_at_peer", "current_round",
+            "current_phase", "final_status", "feedback",
+            "analyst_feedback", "programmer_feedback",
+        ]
+        saved = {k: getattr(orch, k) for k in keys}
+        saved["outputs"] = orch.outputs.copy()
+        saved["terminal_ids"] = orch.terminal_ids.copy()
+        saved["_explore_sent"] = orch._explore_sent.copy()
+        return saved
+
+    def _restore_globals(self, saved):
+        for k, v in saved.items():
+            if k == "outputs":
+                orch.outputs.update(v)
+            elif k == "terminal_ids":
+                orch.terminal_ids.update(v)
+            elif k == "_explore_sent":
+                orch._explore_sent.clear()
+                orch._explore_sent.update(v)
+            else:
+                setattr(orch, k, v)
+
+    @patch("run_orchestrator_loop.cleanup")
+    @patch("run_orchestrator_loop.save_state")
+    @patch("run_orchestrator_loop.send_and_wait")
+    @patch("run_orchestrator_loop.ensure_response_dir")
+    @patch("run_orchestrator_loop.init_new_run")
+    @patch("run_orchestrator_loop.load_config")
+    @patch("run_orchestrator_loop._apply_config")
+    @patch("run_orchestrator_loop.ApiClient")
+    def test_peer_analyst_first_dispatch_skips_analyst(
+        self, mock_api_cls, mock_apply, mock_load_cfg,
+        mock_init, mock_ensure, mock_send, mock_save, mock_cleanup
+    ):
+        """START_AGENT=peer_analyst: analyst dispatch skipped, peer review happens."""
+        mock_load_cfg.return_value = {}
+        mock_api_cls.return_value = orch.api
+
+        def fake_init():
+            orch.session_name = "cao-test"
+            orch.terminal_ids.update({
+                "analyst": "a1", "peer_analyst": "pa1",
+                "programmer": "p1", "peer_programmer": "pp1", "tester": "t1",
+            })
+            orch.current_round = 1
+            orch.current_phase = orch.PHASE_ANALYST
+            orch._start_at_peer = True
+            orch.outputs["analyst"] = orch._UPSTREAM_PLACEHOLDER
+            for k in ["analyst_review", "programmer", "programmer_review", "tester"]:
+                orch.outputs[k] = ""
+            orch.final_status = "RUNNING"
+            orch.feedback = "None yet."
+            orch.analyst_feedback = "None yet."
+            orch.programmer_feedback = "None yet."
+        mock_init.side_effect = fake_init
+
+        mock_send.side_effect = [
+            "REVIEW_RESULT: REVISE\nREVIEW_NOTES: needs work",
+            "PROGRAMMER_SUMMARY:\n- Files changed: x.py",
+            textwrap.dedent("""\
+                REVIEW_RESULT: APPROVED
+                REVIEW_NOTES:
+                - Implementation code changes look correct.
+                - Validation test command runs clean.
+                - Risk of regression is low, quality coverage adequate.
+                - No remaining issues found.
+            """),
+            "RESULT: PASS\nEVIDENCE: all tests passed",
+        ]
+
+        saved = self._save_globals()
+        try:
+            orch.START_AGENT = "peer_analyst"
+            orch.MAX_ROUNDS = 1
+            orch.MAX_REVIEW_CYCLES = 1
+            orch.MIN_REVIEW_CYCLES_BEFORE_APPROVAL = 1
+            orch.PROMPT = (
+                "*** ORIGINAL EXPLORE SUMMARY ***\n"
+                "Explore content.\n"
+                "*** SCENARIO TEST ***\n"
+                "Test content."
+            )
+            orch.PROMPT_FILE = ""
+            orch.RESUME = False
+            orch.STATE_FILE = "/tmp/nonexistent-test-start-agent.json"
+            orch._explore_sent.clear()
+
+            with pytest.raises(SystemExit) as exc_info:
+                orch.main()
+            assert exc_info.value.code == 0
+
+            call_roles = [c[0][1] for c in mock_send.call_args_list]
+            assert "analyst" not in call_roles  # Skipped!
+            assert "analyst_review" in call_roles
+            assert "programmer" in call_roles
+            assert "tester" in call_roles
+        finally:
+            self._restore_globals(saved)
+
+    @patch("run_orchestrator_loop.cleanup")
+    @patch("run_orchestrator_loop.save_state")
+    @patch("run_orchestrator_loop.send_and_wait")
+    @patch("run_orchestrator_loop.ensure_response_dir")
+    @patch("run_orchestrator_loop.init_new_run")
+    @patch("run_orchestrator_loop.load_config")
+    @patch("run_orchestrator_loop._apply_config")
+    @patch("run_orchestrator_loop.ApiClient")
+    def test_peer_programmer_first_dispatch_skips_programmer(
+        self, mock_api_cls, mock_apply, mock_load_cfg,
+        mock_init, mock_ensure, mock_send, mock_save, mock_cleanup
+    ):
+        """START_AGENT=peer_programmer: programmer dispatch skipped, peer review happens."""
+        mock_load_cfg.return_value = {}
+        mock_api_cls.return_value = orch.api
+
+        def fake_init():
+            orch.session_name = "cao-test"
+            orch.terminal_ids.update({
+                "analyst": "a1", "peer_analyst": "pa1",
+                "programmer": "p1", "peer_programmer": "pp1", "tester": "t1",
+            })
+            orch.current_round = 1
+            orch.current_phase = orch.PHASE_PROGRAMMER
+            orch._start_at_peer = True
+            orch.outputs["analyst"] = orch._UPSTREAM_PLACEHOLDER
+            orch.outputs["programmer"] = orch._UPSTREAM_PLACEHOLDER
+            for k in ["analyst_review", "programmer_review", "tester"]:
+                orch.outputs[k] = ""
+            orch.final_status = "RUNNING"
+            orch.feedback = "None yet."
+            orch.analyst_feedback = "None yet."
+            orch.programmer_feedback = "None yet."
+        mock_init.side_effect = fake_init
+
+        mock_send.side_effect = [
+            "REVIEW_RESULT: REVISE\nREVIEW_NOTES: needs work",
+            "RESULT: PASS\nEVIDENCE: all tests passed",
+        ]
+
+        saved = self._save_globals()
+        try:
+            orch.START_AGENT = "peer_programmer"
+            orch.MAX_ROUNDS = 1
+            orch.MAX_REVIEW_CYCLES = 1
+            orch.MIN_REVIEW_CYCLES_BEFORE_APPROVAL = 1
+            orch.PROMPT = (
+                "*** ORIGINAL EXPLORE SUMMARY ***\n"
+                "Explore content.\n"
+                "*** SCENARIO TEST ***\n"
+                "Test content."
+            )
+            orch.PROMPT_FILE = ""
+            orch.RESUME = False
+            orch.STATE_FILE = "/tmp/nonexistent-test-start-agent.json"
+            orch._explore_sent.clear()
+
+            with pytest.raises(SystemExit) as exc_info:
+                orch.main()
+            assert exc_info.value.code == 0
+
+            call_roles = [c[0][1] for c in mock_send.call_args_list]
+            assert "analyst" not in call_roles
+            assert "analyst_review" not in call_roles
+            assert "programmer" not in call_roles  # Skipped!
+            assert "programmer_review" in call_roles
+            assert "tester" in call_roles
+        finally:
+            self._restore_globals(saved)

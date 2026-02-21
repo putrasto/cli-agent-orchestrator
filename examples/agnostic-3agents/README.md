@@ -35,7 +35,20 @@ The prompt **must** contain both headers:
 
 ## 3. Run the orchestrator loop
 
-The orchestrator runs **against a target project**, not from within it. You must set `WD` to point at the project you want the agents to work on, and `PROMPT_FILE` to a prompt describing the task.
+The orchestrator runs **against a target project**, not from within it. You can configure it via a JSON config file (recommended) or environment variables.
+
+### Using a JSON config file (recommended)
+
+```bash
+python examples/agnostic-3agents/run_orchestrator_loop.py config-fresh.json
+```
+
+See sample config files in this directory:
+- `config-fresh.json` — full config with mixed providers (e.g., Claude Code for analyst, Codex for peers)
+- `config-incremental.json` — full config for incremental changes on existing projects (incremental behavior is driven by the prompt file content, not a config flag)
+- `config-resume.json` — minimal config for resuming an interrupted run
+
+### Using environment variables (backward compatible)
 
 ```bash
 PROMPT_FILE="/path/to/your/project/.tmp/prompt.txt" \
@@ -55,6 +68,10 @@ MIN_REVIEW_CYCLES_BEFORE_APPROVAL=1 \
 CLEANUP_ON_EXIT=1 \
   python examples/agnostic-3agents/run_orchestrator_loop.py
 ```
+
+### Config precedence
+
+Environment variables > JSON config file > hardcoded defaults. Empty env vars are treated as unset.
 
 - `WD` — the project the agents will explore, modify, and test. Response files and state are written under `WD/.tmp/`.
 - `PROMPT_FILE` — absolute path to the prompt file (can live anywhere, but keeping it in `WD/.tmp/` is convenient).
@@ -88,6 +105,7 @@ CLEANUP_ON_EXIT=1 \
 | `MAX_REVIEW_CYCLES` | `3` | Max peer review cycles per phase (recommended: `2`) |
 | `MIN_REVIEW_CYCLES_BEFORE_APPROVAL` | `2` | Min cycles before peer can approve (recommended: `1`) |
 | `PROJECT_TEST_CMD` | (empty) | Test command for programmer reviewer to run |
+| `START_AGENT` | `analyst` | Start orchestration from this agent (`analyst`, `peer_analyst`, `programmer`, `peer_programmer`, `tester`). Ignored on resume. |
 | `CLEANUP_ON_EXIT` | `0` | Set `1` to exit all terminals on completion |
 
 ### Token control
@@ -141,13 +159,14 @@ If the orchestrator is interrupted (Ctrl+C), it saves state automatically. On ne
 
 ```bash
 # First run — gets interrupted
-WD=/path/to/project PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
-  python examples/agnostic-3agents/run_orchestrator_loop.py
+python examples/agnostic-3agents/run_orchestrator_loop.py config-fresh.json
 # ^C
 
-# Resumes automatically (state file has RUNNING status)
-WD=/path/to/project PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
-  python examples/agnostic-3agents/run_orchestrator_loop.py
+# Resume using the resume config
+python examples/agnostic-3agents/run_orchestrator_loop.py config-resume.json
+
+# Or resumes automatically (state file has RUNNING status)
+python examples/agnostic-3agents/run_orchestrator_loop.py config-fresh.json
 ```
 
 To force a fresh start after interruption:

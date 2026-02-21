@@ -1,0 +1,5 @@
+{
+  "api": "http://localhost:9889",
+  "wd": "/path/to/your/project",
+  "resume": true
+}

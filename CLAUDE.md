@@ -58,7 +58,6 @@ Key layers:
 | Providers | `src/cli_agent_orchestrator/providers/{codex,q_cli,kiro_cli,claude_code}.py` |
 | Terminal service | `src/cli_agent_orchestrator/services/terminal_service.py` |
 | Constants | `src/cli_agent_orchestrator/constants.py` |
-| 3-agent orchestrator (shell) | `examples/agnostic-3agents/run_orchestrator_loop.sh` |
 | 3-agent orchestrator (Python) | `examples/agnostic-3agents/run_orchestrator_loop.py` |
 | Agent profiles | `examples/agnostic-3agents/{system_analyst,peer_system_analyst,programmer,peer_programmer,tester}.md` |
 | Orchestrator tests | `test/examples/test_orchestrator_loop_unit.py` |
@@ -74,7 +73,7 @@ Key layers:
 
 ## State file format (orchestrator loop)
 
-The orchestrator loop persists state to `.tmp/codex-3agents-loop-state.json` with `version: 1`. The Python and shell orchestrators produce byte-compatible state files for cross-tool resume.
+The orchestrator loop persists state to `.tmp/codex-3agents-loop-state.json` with `version: 1`. The Python orchestrator stores per-agent provider info in terminals (dict format). Old plain-string state files are read with backward compatibility but new state files are not guaranteed to be readable by the former shell orchestrator.
 
 ## Important env vars (orchestrator loop)
 

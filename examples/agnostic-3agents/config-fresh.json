@@ -1,0 +1,43 @@
+{
+  "api": "http://localhost:9889",
+  "provider": "codex",
+  "wd": "/path/to/your/project",
+  "prompt_file": "prompt.md",
+  "project_test_cmd": "",
+
+  "agents": {
+    "analyst":        { "provider": "claude_code" },
+    "peer_analyst":   { "provider": "codex" },
+    "programmer":     { "provider": "claude_code" },
+    "peer_programmer":{ "provider": "codex" },
+    "tester":         { "provider": "codex" }
+  },
+
+  "limits": {
+    "max_rounds": 8,
+    "max_review_cycles": 3,
+    "min_review_cycles_before_approval": 2,
+    "poll_seconds": 2,
+    "require_review_evidence": true,
+    "review_evidence_min_match": 3
+  },
+
+  "condensation": {
+    "condense_cross_phase": true,
+    "max_cross_phase_lines": 40,
+    "condense_upstream_on_repeat": true,
+    "condense_explore_on_repeat": true,
+    "condense_review_feedback": true,
+    "max_feedback_lines": 30
+  },
+
+  "handoff": {
+    "strict_file_handoff": true,
+    "idle_grace_seconds": 30,
+    "response_timeout": 1800
+  },
+
+  "start_agent": "analyst",
+  "cleanup_on_exit": false,
+  "resume": false
+}

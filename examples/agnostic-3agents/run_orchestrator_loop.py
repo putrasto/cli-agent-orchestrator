@@ -2,7 +2,7 @@
 """
 Python orchestrator loop with file-based agent handoff.
 
-Replaces the shell-based run_orchestrator_loop.sh with a cleaner mechanism:
+Replaces the prior shell-based implementation with a cleaner mechanism:
 each agent writes its final response to a file, the orchestrator polls for
 file existence, reads it, deletes it, and passes the content to the next agent.
 
@@ -25,35 +25,226 @@ import httpx
 
 # ── 2. Configuration ────────────────────────────────────────────────────────
 
-API = os.getenv("API", "http://localhost:9889")
-PROVIDER = os.getenv("PROVIDER", "codex")
-WD = os.getenv("WD", os.getcwd())
-PROMPT = os.getenv("PROMPT", "")
-PROMPT_FILE = os.getenv("PROMPT_FILE", "")
-MAX_ROUNDS = int(os.getenv("MAX_ROUNDS", "8"))
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "2"))
-MAX_REVIEW_CYCLES = int(os.getenv("MAX_REVIEW_CYCLES", "3"))
-PROJECT_TEST_CMD = os.getenv("PROJECT_TEST_CMD", "")
-MIN_REVIEW_CYCLES_BEFORE_APPROVAL = int(
-    os.getenv("MIN_REVIEW_CYCLES_BEFORE_APPROVAL", "2")
-)
-REQUIRE_REVIEW_EVIDENCE = os.getenv("REQUIRE_REVIEW_EVIDENCE", "1") == "1"
-REVIEW_EVIDENCE_MIN_MATCH = int(os.getenv("REVIEW_EVIDENCE_MIN_MATCH", "3"))
-RESUME = os.getenv("RESUME", "0") == "1"
-MAX_STRUCTURED_OUTPUT_LINES = int(os.getenv("MAX_STRUCTURED_OUTPUT_LINES", "60"))
-CONDENSE_EXPLORE_ON_REPEAT = os.getenv("CONDENSE_EXPLORE_ON_REPEAT", "1") == "1"
-CONDENSE_REVIEW_FEEDBACK = os.getenv("CONDENSE_REVIEW_FEEDBACK", "1") == "1"
-MAX_FEEDBACK_LINES = int(os.getenv("MAX_FEEDBACK_LINES", "30"))
-CONDENSE_UPSTREAM_ON_REPEAT = os.getenv("CONDENSE_UPSTREAM_ON_REPEAT", "1") == "1"
-CONDENSE_CROSS_PHASE = os.getenv("CONDENSE_CROSS_PHASE", "1") == "1"
-MAX_CROSS_PHASE_LINES = int(os.getenv("MAX_CROSS_PHASE_LINES", "40"))
-STATE_FILE = os.getenv("STATE_FILE", str(Path(WD) / ".tmp" / "codex-3agents-loop-state.json"))
-CLEANUP_ON_EXIT = os.getenv("CLEANUP_ON_EXIT", "0") == "1"
+VALID_PROVIDERS = frozenset({"codex", "claude_code", "q_cli", "kiro_cli"})
+VALID_TOP_LEVEL_KEYS = frozenset({
+    "api", "provider", "wd", "prompt", "prompt_file", "project_test_cmd",
+    "agents", "limits", "condensation", "handoff",
+    "cleanup_on_exit", "resume", "state_file", "start_agent",
+})
+VALID_AGENT_ROLES = frozenset({
+    "analyst", "peer_analyst", "programmer", "peer_programmer", "tester",
+})
+DEFAULT_AGENT_PROFILES = {
+    "analyst": "system_analyst",
+    "peer_analyst": "peer_system_analyst",
+    "programmer": "programmer",
+    "peer_programmer": "peer_programmer",
+    "tester": "tester",
+}
 
-RESPONSE_DIR = Path(WD) / ".tmp" / "agent-responses"
-RESPONSE_TIMEOUT = int(os.getenv("RESPONSE_TIMEOUT", "1800"))
-IDLE_GRACE_SECONDS = int(os.getenv("IDLE_GRACE_SECONDS", "30"))
-STRICT_FILE_HANDOFF = os.getenv("STRICT_FILE_HANDOFF", "1") == "1"
+# (json_dotted_path, env_var_name, hardcoded_default, value_type)
+_CONFIG_KEYS: list[tuple[str, str, object, type]] = [
+    ("api",                                        "API",                                "http://localhost:9889", str),
+    ("provider",                                   "PROVIDER",                           "codex",                str),
+    ("wd",                                         "WD",                                 os.getcwd(),            str),
+    ("prompt",                                     "PROMPT",                             "",                     str),
+    ("prompt_file",                                "PROMPT_FILE",                        "",                     str),
+    ("project_test_cmd",                           "PROJECT_TEST_CMD",                   "",                     str),
+    ("cleanup_on_exit",                            "CLEANUP_ON_EXIT",                    False,                  bool),
+    ("resume",                                     "RESUME",                             False,                  bool),
+    ("state_file",                                 "STATE_FILE",                         "",                     str),
+    ("limits.max_rounds",                          "MAX_ROUNDS",                         8,                      int),
+    ("limits.max_review_cycles",                   "MAX_REVIEW_CYCLES",                  3,                      int),
+    ("limits.min_review_cycles_before_approval",   "MIN_REVIEW_CYCLES_BEFORE_APPROVAL",  2,                      int),
+    ("limits.poll_seconds",                        "POLL_SECONDS",                       2,                      int),
+    ("limits.require_review_evidence",             "REQUIRE_REVIEW_EVIDENCE",            True,                   bool),
+    ("limits.review_evidence_min_match",           "REVIEW_EVIDENCE_MIN_MATCH",          3,                      int),
+    ("condensation.condense_cross_phase",          "CONDENSE_CROSS_PHASE",               True,                   bool),
+    ("condensation.max_cross_phase_lines",         "MAX_CROSS_PHASE_LINES",              40,                     int),
+    ("condensation.condense_upstream_on_repeat",   "CONDENSE_UPSTREAM_ON_REPEAT",        True,                   bool),
+    ("condensation.condense_explore_on_repeat",    "CONDENSE_EXPLORE_ON_REPEAT",         True,                   bool),
+    ("condensation.condense_review_feedback",      "CONDENSE_REVIEW_FEEDBACK",           True,                   bool),
+    ("condensation.max_feedback_lines",            "MAX_FEEDBACK_LINES",                 30,                     int),
+    ("handoff.strict_file_handoff",                "STRICT_FILE_HANDOFF",                True,                   bool),
+    ("handoff.idle_grace_seconds",                 "IDLE_GRACE_SECONDS",                 30,                     int),
+    ("handoff.response_timeout",                   "RESPONSE_TIMEOUT",                   1800,                   int),
+    ("start_agent",                                "START_AGENT",                        "analyst",              str),
+]
+
+
+def _get_json_value(data: dict, dotted_key: str) -> object | None:
+    """Retrieve a value from nested JSON using dotted key (e.g., 'limits.max_rounds')."""
+    parts = dotted_key.split(".")
+    obj: object = data
+    for part in parts:
+        if not isinstance(obj, dict) or part not in obj:
+            return None
+        obj = obj[part]
+    return obj
+
+
+def _parse_env(env_var: str, typ: type) -> object | None:
+    """Read env var; return None if unset or empty string (treated as unset)."""
+    raw = os.environ.get(env_var)
+    if raw is None or raw == "":
+        return None
+    if typ is bool:
+        return raw == "1"
+    if typ is int:
+        return int(raw)
+    return raw
+
+
+def load_config(argv: list[str] | None = None) -> dict:
+    """Load config from optional JSON file + env vars + hardcoded defaults.
+
+    Precedence (highest to lowest): env vars > JSON file > hardcoded defaults.
+    Empty env vars are treated as unset. The ``agents`` section is JSON-only
+    with no env var mapping.
+
+    Returns a flat dict keyed by env var names, plus ``_agent_config``.
+    """
+    if argv is None:
+        argv = sys.argv
+
+    json_data: dict = {}
+
+    # Load JSON config file if provided as argv[1]
+    if len(argv) > 1:
+        config_path = Path(argv[1])
+        if not config_path.is_file():
+            print(f"Config file not found: {argv[1]}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            json_data = json.loads(config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            print(f"Invalid JSON in config file {argv[1]}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Validate top-level keys
+        unknown = set(json_data.keys()) - VALID_TOP_LEVEL_KEYS
+        if unknown:
+            print(f"Unknown config keys: {', '.join(sorted(unknown))}", file=sys.stderr)
+            sys.exit(1)
+
+    # Build flat config: defaults -> JSON overrides -> env var overrides
+    cfg: dict = {}
+    for json_path, env_var, default, typ in _CONFIG_KEYS:
+        value = default
+        json_val = _get_json_value(json_data, json_path)
+        if json_val is not None:
+            if typ is bool:
+                value = bool(json_val)
+            elif typ is int:
+                value = int(json_val)
+            else:
+                value = str(json_val)
+        env_val = _parse_env(env_var, typ)
+        if env_val is not None:
+            value = env_val
+        cfg[env_var] = value
+
+    # Compute STATE_FILE default if not set
+    if not cfg["STATE_FILE"]:
+        cfg["STATE_FILE"] = str(Path(cfg["WD"]) / ".tmp" / "codex-3agents-loop-state.json")
+
+    # Validate top-level provider early (fail-fast before agent merge)
+    top_provider = cfg["PROVIDER"]
+    if top_provider not in VALID_PROVIDERS:
+        print(
+            f"Invalid provider '{top_provider}'. "
+            f"Valid: {', '.join(sorted(VALID_PROVIDERS))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Build AGENT_CONFIG: per-role {provider, profile}
+    agents_json = json_data.get("agents", {})
+
+    if agents_json:
+        unknown_roles = set(agents_json.keys()) - VALID_AGENT_ROLES
+        if unknown_roles:
+            print(
+                f"Unknown agent roles: {', '.join(sorted(unknown_roles))}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    agent_config: dict[str, dict[str, str]] = {}
+    for role in sorted(VALID_AGENT_ROLES):
+        role_cfg = agents_json.get(role, {})
+        provider = role_cfg.get("provider", top_provider)
+        profile = role_cfg.get("profile", DEFAULT_AGENT_PROFILES[role])
+        if provider not in VALID_PROVIDERS:
+            print(
+                f"Invalid provider '{provider}' for agent '{role}'. "
+                f"Valid: {', '.join(sorted(VALID_PROVIDERS))}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        agent_config[role] = {"provider": provider, "profile": profile}
+
+    cfg["_agent_config"] = agent_config
+
+    # Validate START_AGENT
+    start_agent = cfg.get("START_AGENT", "analyst")
+    if start_agent not in VALID_AGENT_ROLES:
+        print(
+            f"Invalid start_agent '{start_agent}'. "
+            f"Valid: {', '.join(sorted(VALID_AGENT_ROLES))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return cfg
+
+
+def _apply_config(cfg: dict) -> None:
+    """Apply a loaded config dict to module-level globals."""
+    global API, PROVIDER, WD, PROMPT, PROMPT_FILE, PROJECT_TEST_CMD
+    global MAX_ROUNDS, POLL_SECONDS, MAX_REVIEW_CYCLES
+    global MIN_REVIEW_CYCLES_BEFORE_APPROVAL, REQUIRE_REVIEW_EVIDENCE
+    global REVIEW_EVIDENCE_MIN_MATCH, RESUME
+    global CONDENSE_EXPLORE_ON_REPEAT, CONDENSE_REVIEW_FEEDBACK
+    global MAX_FEEDBACK_LINES, CONDENSE_UPSTREAM_ON_REPEAT
+    global CONDENSE_CROSS_PHASE, MAX_CROSS_PHASE_LINES
+    global STATE_FILE, CLEANUP_ON_EXIT
+    global RESPONSE_TIMEOUT, IDLE_GRACE_SECONDS, STRICT_FILE_HANDOFF
+    global RESPONSE_DIR, AGENT_CONFIG, START_AGENT
+
+    API = cfg["API"]
+    PROVIDER = cfg["PROVIDER"]
+    WD = cfg["WD"]
+    PROMPT = cfg["PROMPT"]
+    PROMPT_FILE = cfg["PROMPT_FILE"]
+    PROJECT_TEST_CMD = cfg["PROJECT_TEST_CMD"]
+    MAX_ROUNDS = cfg["MAX_ROUNDS"]
+    POLL_SECONDS = cfg["POLL_SECONDS"]
+    MAX_REVIEW_CYCLES = cfg["MAX_REVIEW_CYCLES"]
+    MIN_REVIEW_CYCLES_BEFORE_APPROVAL = cfg["MIN_REVIEW_CYCLES_BEFORE_APPROVAL"]
+    REQUIRE_REVIEW_EVIDENCE = cfg["REQUIRE_REVIEW_EVIDENCE"]
+    REVIEW_EVIDENCE_MIN_MATCH = cfg["REVIEW_EVIDENCE_MIN_MATCH"]
+    RESUME = cfg["RESUME"]
+    CONDENSE_EXPLORE_ON_REPEAT = cfg["CONDENSE_EXPLORE_ON_REPEAT"]
+    CONDENSE_REVIEW_FEEDBACK = cfg["CONDENSE_REVIEW_FEEDBACK"]
+    MAX_FEEDBACK_LINES = cfg["MAX_FEEDBACK_LINES"]
+    CONDENSE_UPSTREAM_ON_REPEAT = cfg["CONDENSE_UPSTREAM_ON_REPEAT"]
+    CONDENSE_CROSS_PHASE = cfg["CONDENSE_CROSS_PHASE"]
+    MAX_CROSS_PHASE_LINES = cfg["MAX_CROSS_PHASE_LINES"]
+    STATE_FILE = cfg["STATE_FILE"]
+    CLEANUP_ON_EXIT = cfg["CLEANUP_ON_EXIT"]
+    RESPONSE_TIMEOUT = cfg["RESPONSE_TIMEOUT"]
+    IDLE_GRACE_SECONDS = cfg["IDLE_GRACE_SECONDS"]
+    STRICT_FILE_HANDOFF = cfg["STRICT_FILE_HANDOFF"]
+    RESPONSE_DIR = Path(WD) / ".tmp" / "agent-responses"
+    AGENT_CONFIG = cfg["_agent_config"]
+    START_AGENT = cfg["START_AGENT"]
+
+
+# Initialize globals from env vars only (no JSON file at import time).
+# main() re-calls load_config() with sys.argv to pick up JSON config file.
+_apply_config(load_config(argv=["_init"]))
+MAX_STRUCTURED_OUTPUT_LINES = int(os.getenv("MAX_STRUCTURED_OUTPUT_LINES", "60"))
 
 EXPLORE_HEADER = "*** ORIGINAL EXPLORE SUMMARY ***"
 SCENARIO_HEADER = "*** SCENARIO TEST ***"
@@ -62,6 +253,20 @@ PHASE_ANALYST = "analyst"
 PHASE_PROGRAMMER = "programmer"
 PHASE_TESTER = "tester"
 PHASE_DONE = "done"
+
+# Maps START_AGENT role to the phase it belongs to.
+_ROLE_PHASE_MAP = {
+    "analyst": PHASE_ANALYST,
+    "peer_analyst": PHASE_ANALYST,
+    "programmer": PHASE_PROGRAMMER,
+    "peer_programmer": PHASE_PROGRAMMER,
+    "tester": PHASE_TESTER,
+}
+
+_UPSTREAM_PLACEHOLDER = (
+    "(No upstream output — START_AGENT skipped this phase. "
+    "Use codebase and prompt for context.)"
+)
 
 RESPONSE_FILES = {
     "analyst": "analyst_summary.md",
@@ -91,18 +296,18 @@ class ApiClient:
     def __init__(self, base_url: str) -> None:
         self._client = httpx.Client(base_url=base_url, timeout=30.0)
 
-    def create_session(self, profile: str) -> dict:
+    def create_session(self, profile: str, provider: str) -> dict:
         r = self._client.post(
             "/sessions",
-            params={"provider": PROVIDER, "agent_profile": profile, "working_directory": WD},
+            params={"provider": provider, "agent_profile": profile, "working_directory": WD},
         )
         r.raise_for_status()
         return r.json()
 
-    def create_terminal(self, session_name: str, profile: str) -> dict:
+    def create_terminal(self, session_name: str, profile: str, provider: str) -> dict:
         r = self._client.post(
             f"/sessions/{session_name}/terminals",
-            params={"provider": PROVIDER, "agent_profile": profile, "working_directory": WD},
+            params={"provider": provider, "agent_profile": profile, "working_directory": WD},
         )
         r.raise_for_status()
         return r.json()
@@ -461,8 +666,18 @@ def build_analyst_prompt(round_num: int, analyst_cycle: int) -> str:
         "system anaylist: dont do testing, dont implement code",
         "",
         "Task:",
-        "1) Explore the codebase.",
-        "2) Create/update all OpenSpec artifacts using the OpenSpec fast-forward skill.",
+    ]
+    if round_num > 1:
+        parts.extend([
+            "1) Use the OpenSpec explore skill to investigate the test failure described in the tester feedback above.",
+            "2) Based on your findings, use the OpenSpec fast-forward skill to update the artifacts.",
+        ])
+    else:
+        parts.extend([
+            "1) Explore the codebase.",
+            "2) Create/update all OpenSpec artifacts using the OpenSpec fast-forward skill.",
+        ])
+    parts.extend([
         "3) Return ANALYST_SUMMARY exactly as profile format.",
         "4) Include mandatory sections in ANALYST_SUMMARY:",
         "   - Artifact review per file: proposal.md, design.md, tasks.md, specs/* (PASS|REVISE + evidence).",
@@ -471,7 +686,7 @@ def build_analyst_prompt(round_num: int, analyst_cycle: int) -> str:
         "   - Downstream contract impact: planner/API/converter/revised_document implications.",
         "   - Explicit handoff: concrete actions for programmer.",
         response_file_instruction("analyst"),
-    ]
+    ])
     return "\n".join(parts)
 
 
@@ -592,6 +807,9 @@ def build_tester_prompt(programmer_out: str) -> str:
 
 # ── 10. State management ───────────────────────────────────────────────────
 
+_start_at_peer: bool = False
+_loaded_state_terminals: dict = {}  # Normalized terminal data from load_state()
+
 session_name: str = ""
 terminal_ids: dict[str, str] = {
     "analyst": "",
@@ -630,11 +848,8 @@ def save_state() -> None:
         "final_status": final_status,
         "session_name": session_name,
         "terminals": {
-            "analyst": terminal_ids["analyst"],
-            "peer_analyst": terminal_ids["peer_analyst"],
-            "programmer": terminal_ids["programmer"],
-            "peer_programmer": terminal_ids["peer_programmer"],
-            "tester": terminal_ids["tester"],
+            role: {"id": terminal_ids[role], "provider": AGENT_CONFIG[role]["provider"]}
+            for role in terminal_ids
         },
         "feedback": feedback,
         "analyst_feedback": analyst_feedback,
@@ -653,6 +868,7 @@ def save_state() -> None:
 def load_state() -> bool:
     global session_name, current_round, current_phase, final_status
     global feedback, analyst_feedback, programmer_feedback
+    global _loaded_state_terminals
 
     state_path = Path(STATE_FILE)
     if not state_path.is_file():
@@ -661,12 +877,21 @@ def load_state() -> bool:
     data = json.loads(state_path.read_text(encoding="utf-8"))
 
     session_name = data.get("session_name", "")
+    state_provider = data.get("provider", PROVIDER)
     terminals = data.get("terminals", {})
-    terminal_ids["analyst"] = terminals.get("analyst", "")
-    terminal_ids["peer_analyst"] = terminals.get("peer_analyst", "")
-    terminal_ids["programmer"] = terminals.get("programmer", "")
-    terminal_ids["peer_programmer"] = terminals.get("peer_programmer", "")
-    terminal_ids["tester"] = terminals.get("tester", "")
+    for role in terminal_ids:
+        val = terminals.get(role, "")
+        if isinstance(val, dict):
+            # New format: {"id": ..., "provider": ...}
+            terminal_ids[role] = val.get("id", "")
+        else:
+            # Old format: plain string terminal ID — normalize to dict so
+            # verify_resume_terminals() can do provider consistency checks.
+            tid = str(val) if val else ""
+            terminal_ids[role] = tid
+            if tid:
+                terminals[role] = {"id": tid, "provider": state_provider}
+    _loaded_state_terminals = terminals
 
     current_round = data.get("current_round", 1)
     if not isinstance(current_round, int):
@@ -700,34 +925,80 @@ def load_state() -> bool:
 def log_terminal_ids() -> None:
     log(f"SESSION_NAME={session_name}")
     for role, tid in terminal_ids.items():
-        log(f"  {role}={tid}")
+        log(f"  {role}={tid} (provider={AGENT_CONFIG[role]['provider']})")
+
+
+def _rename_terminal(terminal_id: str, role: str) -> None:
+    """Best-effort rename: send /rename command and wait up to 5s for idle."""
+    rename_label = f"{role}-{terminal_id}"
+    try:
+        api.send_input(terminal_id, f"/rename {rename_label}")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            status = api.get_status(terminal_id)
+            if status in ("idle", "completed"):
+                return
+            time.sleep(0.5)
+        log(f"Warning: rename for {role} did not reach idle within 5s")
+    except Exception as e:
+        log(f"Warning: rename for {role} failed: {e}")
 
 
 def init_new_run() -> None:
     global session_name, current_round, current_phase, final_status
-    global feedback, analyst_feedback, programmer_feedback
+    global feedback, analyst_feedback, programmer_feedback, _start_at_peer
 
-    result = api.create_session("system_analyst")
-    terminal_ids["analyst"] = result["id"]
-    session_name = result["session_name"]
+    created_terminal_ids: list[str] = []
+    roles_in_order = [
+        "analyst", "peer_analyst", "programmer", "peer_programmer", "tester",
+    ]
 
-    for role, profile in [
-        ("peer_analyst", "peer_system_analyst"),
-        ("programmer", "programmer"),
-        ("peer_programmer", "peer_programmer"),
-        ("tester", "tester"),
-    ]:
-        result = api.create_terminal(session_name, profile)
-        terminal_ids[role] = result["id"]
+    try:
+        # First terminal creates the session
+        first_role = roles_in_order[0]
+        first_cfg = AGENT_CONFIG[first_role]
+        result = api.create_session(first_cfg["profile"], provider=first_cfg["provider"])
+        terminal_ids[first_role] = result["id"]
+        created_terminal_ids.append(result["id"])
+        session_name = result["session_name"]
+        _rename_terminal(result["id"], first_role)
+
+        # Remaining terminals
+        for role in roles_in_order[1:]:
+            role_cfg = AGENT_CONFIG[role]
+            result = api.create_terminal(
+                session_name, role_cfg["profile"], provider=role_cfg["provider"]
+            )
+            terminal_ids[role] = result["id"]
+            created_terminal_ids.append(result["id"])
+            _rename_terminal(result["id"], role)
+
+    except Exception as e:
+        log(f"Terminal creation failed: {e}")
+        for tid in created_terminal_ids:
+            api.exit_terminal(tid)
+        sys.exit(1)
 
     current_round = 1
-    current_phase = PHASE_ANALYST
+    current_phase = _ROLE_PHASE_MAP[START_AGENT]
     final_status = "RUNNING"
     feedback = "None yet."
     analyst_feedback = "None yet."
     programmer_feedback = "None yet."
     for key in outputs:
         outputs[key] = ""
+
+    # Pre-populate placeholder outputs for skipped upstream phases
+    if START_AGENT in ("programmer", "peer_programmer", "tester"):
+        outputs["analyst"] = _UPSTREAM_PLACEHOLDER
+    if START_AGENT in ("peer_programmer", "tester"):
+        outputs["programmer"] = _UPSTREAM_PLACEHOLDER
+    if START_AGENT == "peer_analyst":
+        outputs["analyst"] = _UPSTREAM_PLACEHOLDER
+
+    # For peer roles, skip primary agent dispatch on first cycle
+    if START_AGENT in ("peer_analyst", "peer_programmer"):
+        _start_at_peer = True
 
     save_state()
     log(f"Initialized new run. State file: {STATE_FILE}")
@@ -747,6 +1018,10 @@ def should_auto_resume(state_file: str) -> bool:
 
 
 def verify_resume_terminals() -> None:
+    # Use normalized terminal data from load_state() — handles both new dict
+    # format and old string format (normalized with state-level provider).
+    state_terminals = _loaded_state_terminals
+
     for role, tid in terminal_ids.items():
         if not tid:
             print(f"Cannot resume: missing terminal ID for '{role}' in state file ({STATE_FILE}).", file=sys.stderr)
@@ -756,6 +1031,17 @@ def verify_resume_terminals() -> None:
         except httpx.HTTPError:
             print(f"Cannot resume: terminal '{tid}' ({role}) is unreachable from API '{API}'.", file=sys.stderr)
             sys.exit(1)
+
+        # Check provider consistency
+        stored = state_terminals.get(role, {})
+        if isinstance(stored, dict):
+            stored_provider = stored.get("provider", "")
+            current_provider = AGENT_CONFIG[role]["provider"]
+            if stored_provider and stored_provider != current_provider:
+                log(
+                    f"Warning: provider mismatch for '{role}': "
+                    f"state has '{stored_provider}', config has '{current_provider}'"
+                )
 
 
 # ── 12. Main loop + cleanup + entry point ──────────────────────────────────
@@ -786,7 +1072,13 @@ def _signal_handler(signum: int, _frame: object) -> None:
 def main() -> None:
     global PROMPT, EXPLORE_SUMMARY, SCENARIO_TEST
     global current_round, current_phase, final_status
-    global feedback, analyst_feedback, programmer_feedback
+    global feedback, analyst_feedback, programmer_feedback, _start_at_peer
+
+    # Load config from JSON file (if provided) + env vars + defaults
+    cfg = load_config()
+    _apply_config(cfg)
+    global api
+    api = ApiClient(API)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -863,16 +1155,21 @@ def main() -> None:
         if current_phase == PHASE_ANALYST:
             if not analyst_feedback.strip():
                 analyst_feedback = "None yet."
-            outputs["analyst"] = ""
+            if not _start_at_peer:
+                outputs["analyst"] = ""
             outputs["analyst_review"] = ""
             save_state()
 
             analyst_approved = False
             for analyst_cycle in range(1, MAX_REVIEW_CYCLES + 1):
-                log(f"[round {rnd}] system_analyst: cycle {analyst_cycle} - exploring and updating openspec")
-                msg = build_analyst_prompt(rnd, analyst_cycle)
-                outputs["analyst"] = send_and_wait(terminal_ids["analyst"], "analyst", msg)
-                save_state()
+                if _start_at_peer:
+                    log(f"[round {rnd}] START_AGENT={START_AGENT}: skipping analyst dispatch, using placeholder")
+                    _start_at_peer = False
+                else:
+                    log(f"[round {rnd}] system_analyst: cycle {analyst_cycle} - exploring and updating openspec")
+                    msg = build_analyst_prompt(rnd, analyst_cycle)
+                    outputs["analyst"] = send_and_wait(terminal_ids["analyst"], "analyst", msg)
+                    save_state()
 
                 log(f"[round {rnd}] peer_system_analyst: cycle {analyst_cycle} - reviewing analyst output")
                 review_msg = build_analyst_review_prompt(outputs["analyst"])
@@ -919,18 +1216,23 @@ def main() -> None:
 
             if not programmer_feedback.strip():
                 programmer_feedback = "None yet."
-            outputs["programmer"] = ""
+            if not _start_at_peer:
+                outputs["programmer"] = ""
             outputs["programmer_review"] = ""
             save_state()
 
             programmer_approved = False
             for programmer_cycle in range(1, MAX_REVIEW_CYCLES + 1):
-                log(f"[round {rnd}] programmer: cycle {programmer_cycle} - applying openspec and implementing")
-                msg = build_programmer_prompt(rnd, programmer_cycle, outputs["analyst"])
-                outputs["programmer"] = send_and_wait(
-                    terminal_ids["programmer"], "programmer", msg
-                )
-                save_state()
+                if _start_at_peer:
+                    log(f"[round {rnd}] START_AGENT={START_AGENT}: skipping programmer dispatch, using placeholder")
+                    _start_at_peer = False
+                else:
+                    log(f"[round {rnd}] programmer: cycle {programmer_cycle} - applying openspec and implementing")
+                    msg = build_programmer_prompt(rnd, programmer_cycle, outputs["analyst"])
+                    outputs["programmer"] = send_and_wait(
+                        terminal_ids["programmer"], "programmer", msg
+                    )
+                    save_state()
 
                 log(f"[round {rnd}] peer_programmer: cycle {programmer_cycle} - reviewing implementation")
                 review_msg = build_programmer_review_prompt(outputs["programmer"])
