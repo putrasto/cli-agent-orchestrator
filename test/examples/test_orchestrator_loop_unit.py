@@ -769,6 +769,7 @@ class TestWaitForResponseFile:
         self._orig_strict = orch.STRICT_FILE_HANDOFF
         self._orig_poll = orch.POLL_SECONDS
         self._orig_grace = orch.IDLE_GRACE_SECONDS
+        self._orig_reminders = orch.MAX_FILE_REMINDERS
         self._orig_wd = orch.WD
         self._orig_ts = orch._run_timestamp
         self._orig_seq = orch._response_seq
@@ -778,6 +779,7 @@ class TestWaitForResponseFile:
         orch.STRICT_FILE_HANDOFF = self._orig_strict
         orch.POLL_SECONDS = self._orig_poll
         orch.IDLE_GRACE_SECONDS = self._orig_grace
+        orch.MAX_FILE_REMINDERS = self._orig_reminders
         orch.WD = self._orig_wd
         orch._run_timestamp = self._orig_ts
         orch._response_seq = self._orig_seq
@@ -834,6 +836,7 @@ class TestWaitForResponseFile:
         orch.RESPONSE_DIR = tmp_path
         orch.STRICT_FILE_HANDOFF = False
         orch.IDLE_GRACE_SECONDS = 10
+        orch.MAX_FILE_REMINDERS = 0
         # poll1: processing (agent_started=True) | poll2: completed, idle_since=20
         # poll3: completed, idle_check=35 (>grace) → fallback
         mock_status.side_effect = ["processing", "completed", "completed"]
@@ -851,6 +854,7 @@ class TestWaitForResponseFile:
         orch.RESPONSE_DIR = tmp_path
         orch.STRICT_FILE_HANDOFF = True
         orch.IDLE_GRACE_SECONDS = 10
+        orch.MAX_FILE_REMINDERS = 0
         # poll1: processing (agent_started=True) | poll2: completed, idle_since=20
         # poll3: completed, idle_check=35 (>grace) → error
         mock_status.side_effect = ["processing", "completed", "completed"]
@@ -904,6 +908,7 @@ class TestStartupGuard:
         self._orig_strict = orch.STRICT_FILE_HANDOFF
         self._orig_poll = orch.POLL_SECONDS
         self._orig_grace = orch.IDLE_GRACE_SECONDS
+        self._orig_reminders = orch.MAX_FILE_REMINDERS
         self._orig_wd = orch.WD
         self._orig_ts = orch._run_timestamp
         self._orig_seq = orch._response_seq
@@ -913,6 +918,7 @@ class TestStartupGuard:
         orch.STRICT_FILE_HANDOFF = self._orig_strict
         orch.POLL_SECONDS = self._orig_poll
         orch.IDLE_GRACE_SECONDS = self._orig_grace
+        orch.MAX_FILE_REMINDERS = self._orig_reminders
         orch.WD = self._orig_wd
         orch._run_timestamp = self._orig_ts
         orch._response_seq = self._orig_seq
@@ -955,6 +961,7 @@ class TestStartupGuard:
         orch.RESPONSE_DIR = tmp_path
         orch.STRICT_FILE_HANDOFF = True
         orch.IDLE_GRACE_SECONDS = 10
+        orch.MAX_FILE_REMINDERS = 0
 
         # Poll 1 (agent_started=False): startup_elapsed=2 (<10) skip, elapsed=2
         # Poll 2 (agent_started=False): startup_elapsed=12 (>10) → warning,
@@ -1099,6 +1106,245 @@ class TestStartupGuard:
 
         result = orch.wait_for_response_file("analyst", "term-001", timeout=1800)
         assert "Flicker result." in result
+
+
+# ── file reminder on idle grace ─────────────────────────────────────────────
+
+
+class TestFileReminder:
+    """Tests for sending a reminder when agent goes idle without writing response file."""
+
+    def setup_method(self):
+        self._orig_dir = orch.RESPONSE_DIR
+        self._orig_strict = orch.STRICT_FILE_HANDOFF
+        self._orig_poll = orch.POLL_SECONDS
+        self._orig_grace = orch.IDLE_GRACE_SECONDS
+        self._orig_reminders = orch.MAX_FILE_REMINDERS
+        self._orig_wd = orch.WD
+        self._orig_ts = orch._run_timestamp
+        self._orig_seq = orch._response_seq
+
+    def teardown_method(self):
+        orch.RESPONSE_DIR = self._orig_dir
+        orch.STRICT_FILE_HANDOFF = self._orig_strict
+        orch.POLL_SECONDS = self._orig_poll
+        orch.IDLE_GRACE_SECONDS = self._orig_grace
+        orch.MAX_FILE_REMINDERS = self._orig_reminders
+        orch.WD = self._orig_wd
+        orch._run_timestamp = self._orig_ts
+        orch._response_seq = self._orig_seq
+
+    @patch("run_orchestrator_loop.log")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    @patch("run_orchestrator_loop.time")
+    def test_reminder_sent_on_idle_grace_then_file_appears(
+        self, mock_time, mock_status, mock_send, mock_log, tmp_path
+    ):
+        """Grace expires → reminder sent → agent writes file → return content."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.STRICT_FILE_HANDOFF = True
+        orch.IDLE_GRACE_SECONDS = 10
+        orch.MAX_FILE_REMINDERS = 1
+        resp_file = tmp_path / "analyst_summary.md"
+
+        # Poll sequence:
+        # poll1: processing (agent_started=True)
+        # poll2: completed (idle_since=20)
+        # poll3: completed (35-20=15 > 10 → reminder sent, idle_since=None, agent_started=False)
+        # poll4: processing (agent_started=True again after reminder)
+        # poll5: idle + file → return
+        call_count = [0]
+        def status_side_effect(tid):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "processing"
+            if call_count[0] <= 3:
+                return "completed"
+            if call_count[0] == 4:
+                return "processing"
+            if not resp_file.exists():
+                resp_file.write_text("ANALYST_SUMMARY:\nAfter reminder.")
+            return "idle"
+        mock_status.side_effect = status_side_effect
+
+        mock_time.monotonic.side_effect = [
+            0.0,   # start (guard_since = start)
+            10.0,  # poll1: elapsed check
+            20.0,  # poll2: idle_since = monotonic() → 20
+            20.0,  # poll2: elapsed check
+            35.0,  # poll3: grace check (35-20=15 > 10 → send reminder)
+            36.0,  # poll3: guard_since = monotonic() → 36
+            36.0,  # poll3: elapsed check
+            40.0,  # poll4: processing → agent_started=True; elapsed check
+            # poll5: idle + file exists → return (no monotonic calls)
+        ]
+        mock_time.sleep = MagicMock()
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=1800)
+        assert "After reminder." in result
+        mock_send.assert_called_once()
+        args = mock_send.call_args[0]
+        assert args[0] == "term-001"
+        assert "response file" in args[1].lower()
+        reminder_logs = [c for c in mock_log.call_args_list
+                         if "sending reminder" in str(c).lower()]
+        assert len(reminder_logs) == 1
+
+    @patch("run_orchestrator_loop.log")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    @patch("run_orchestrator_loop.time")
+    def test_reminder_exhausted_then_strict_raises(
+        self, mock_time, mock_status, mock_send, mock_log, tmp_path
+    ):
+        """All reminders sent, agent still doesn't write file → RuntimeError in strict mode."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.STRICT_FILE_HANDOFF = True
+        orch.IDLE_GRACE_SECONDS = 10
+        orch.MAX_FILE_REMINDERS = 1
+
+        # Poll sequence:
+        # poll1: processing (agent_started=True)
+        # poll2: completed (idle_since=20)
+        # poll3: completed (35-20=15 > 10 → reminder sent, guard_since=36)
+        # poll4: completed (agent_started=False, startup_elapsed=50-36=14 > 10 → re-enable)
+        # poll5: completed (65-50=15 > 10 → reminders exhausted → error)
+        mock_status.side_effect = [
+            "processing", "completed", "completed",
+            "completed", "completed",
+        ]
+        mock_time.monotonic.side_effect = [
+            0.0,   # start (guard_since = start)
+            10.0,  # poll1: elapsed check
+            20.0,  # poll2: idle_since = monotonic() → 20
+            20.0,  # poll2: elapsed check
+            35.0,  # poll3: grace check (35-20=15 > 10) → send reminder
+            36.0,  # poll3: guard_since = monotonic() → 36
+            36.0,  # poll3: elapsed check
+            50.0,  # poll4: startup_elapsed (50-36=14 > 10 → re-enable guard)
+            50.0,  # poll4: idle_since = monotonic() → 50
+            50.0,  # poll4: elapsed check
+            65.0,  # poll5: grace check (65-50=15 > 10) → reminders exhausted
+        ]
+        mock_time.sleep = MagicMock()
+
+        with pytest.raises(RuntimeError, match="after 1 reminder"):
+            orch.wait_for_response_file("analyst", "term-001", timeout=1800)
+        mock_send.assert_called_once()
+
+    @patch("run_orchestrator_loop.log")
+    @patch.object(orch.api, "get_last_output", return_value="fallback content")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    @patch("run_orchestrator_loop.time")
+    def test_reminder_exhausted_non_strict_falls_back(
+        self, mock_time, mock_status, mock_send, mock_last, mock_log, tmp_path
+    ):
+        """All reminders sent, non-strict mode → falls back to get_last_output."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.STRICT_FILE_HANDOFF = False
+        orch.IDLE_GRACE_SECONDS = 10
+        orch.MAX_FILE_REMINDERS = 1
+
+        mock_status.side_effect = [
+            "processing", "completed", "completed",
+            "completed", "completed",
+        ]
+        mock_time.monotonic.side_effect = [
+            0.0,   # start (guard_since = start)
+            10.0,  # poll1: elapsed check
+            20.0,  # poll2: idle_since = monotonic() → 20
+            20.0,  # poll2: elapsed check
+            35.0,  # poll3: grace check (35-20=15 > 10) → send reminder
+            36.0,  # poll3: guard_since = monotonic() → 36
+            36.0,  # poll3: elapsed check
+            50.0,  # poll4: startup_elapsed (50-36=14 > 10 → re-enable guard)
+            50.0,  # poll4: idle_since = monotonic() → 50
+            50.0,  # poll4: elapsed check
+            65.0,  # poll5: grace check (65-50=15 > 10) → exhausted, fallback
+        ]
+        mock_time.sleep = MagicMock()
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=1800)
+        assert result == "fallback content"
+        mock_send.assert_called_once()
+        mock_last.assert_called_once_with("term-001")
+
+    @patch("run_orchestrator_loop.log")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    @patch("run_orchestrator_loop.time")
+    def test_guard_since_prevents_immediate_startup_release_after_reminder(
+        self, mock_time, mock_status, mock_send, mock_log, tmp_path
+    ):
+        """After reminder, startup timeout uses guard_since (not start).
+
+        Without guard_since fix: poll4 at t=100 would compute 100-0=100 > 10
+        and immediately release the startup guard. With the fix: 100-96=4 < 10,
+        so the guard stays active and the agent gets time to process the reminder.
+        """
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.STRICT_FILE_HANDOFF = True
+        orch.IDLE_GRACE_SECONDS = 10
+        orch.MAX_FILE_REMINDERS = 1
+        resp_file = tmp_path / "analyst_summary.md"
+
+        # Poll sequence:
+        # poll1: processing (agent_started=True)
+        # poll2: completed (idle_since=20)
+        # poll3: completed (95-20=75 > 10 → reminder sent, guard_since=96)
+        # poll4: completed (agent_started=False, 100-96=4 < 10 → guard holds!)
+        # poll5: processing (agent_started=True, agent processes reminder)
+        # poll6: idle + file → return
+        call_count = [0]
+        def status_side_effect(tid):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "processing"
+            if call_count[0] <= 4:
+                return "completed"
+            if call_count[0] == 5:
+                return "processing"
+            if not resp_file.exists():
+                resp_file.write_text("ANALYST_SUMMARY:\nAfter reminder with guard.")
+            return "idle"
+        mock_status.side_effect = status_side_effect
+
+        mock_time.monotonic.side_effect = [
+            0.0,    # start (guard_since = 0)
+            10.0,   # poll1: elapsed check
+            20.0,   # poll2: idle_since = monotonic() → 20
+            20.0,   # poll2: elapsed check
+            95.0,   # poll3: grace check (95-20=75 > 10 → send reminder)
+            96.0,   # poll3: guard_since = monotonic() → 96
+            96.0,   # poll3: elapsed check
+            # poll4: agent_started=False, startup_elapsed = 100-96=4 < 10 → guard holds
+            100.0,  # poll4: startup_elapsed check (100-96=4 < 10, guard stays)
+            100.0,  # poll4: elapsed check
+            # poll5: processing → agent_started=True
+            105.0,  # poll5: elapsed check
+            # poll6: idle + file → return
+        ]
+        mock_time.sleep = MagicMock()
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=1800)
+        assert "After reminder with guard." in result
+        mock_send.assert_called_once()
+
+    def test_build_file_reminder_contains_path(self, tmp_path):
+        """_build_file_reminder includes the correct response file path."""
+        orch.RESPONSE_DIR = tmp_path
+        reminder = orch._build_file_reminder("analyst")
+        expected_path = str(tmp_path / "analyst_summary.md")
+        assert expected_path in reminder
+        assert "AGENT_EOF" in reminder
 
 
 # ── send_and_wait ───────────────────────────────────────────────────────────

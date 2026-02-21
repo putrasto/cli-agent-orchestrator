@@ -36,10 +36,14 @@ The system SHALL poll for the response file with the following logic:
 2. If the response file exists AND terminal status is `idle` or `completed`, read the file, archive it, and return its content
 3. **Startup guard**: The idle grace timer SHALL NOT begin until the agent has been observed in a non-idle/completed state (e.g., `processing`, `waiting_user_answer`) at least once since dispatch. This prevents false-positive idle detection when the terminal still shows stale status from the previous turn.
 4. **Startup timeout**: If the agent has not been observed in a non-idle/completed state within `IDLE_GRACE_SECONDS`, the startup guard SHALL be force-released with a warning log, and normal idle grace timing SHALL begin.
-5. If terminal is `idle`/`completed` without response file for `IDLE_GRACE_SECONDS` (after the startup guard is released):
+5. **File reminder**: If terminal is `idle`/`completed` without response file for `IDLE_GRACE_SECONDS` (after the startup guard is released) and `reminders_sent < MAX_FILE_REMINDERS`:
+   - Send a reminder message to the agent asking it to write the response file
+   - Reset `idle_since` to None and re-arm the startup guard (`agent_started = False`, `guard_since` reset to current time) so the agent gets a fresh startup window to process the reminder
+   - Continue polling
+6. If terminal is `idle`/`completed` without response file for `IDLE_GRACE_SECONDS` and all reminders have been sent (`reminders_sent >= MAX_FILE_REMINDERS`):
    - When `STRICT_FILE_HANDOFF` is True (default): raise a `RuntimeError` (no fallback)
    - When `STRICT_FILE_HANDOFF` is False: fall back to `api.get_last_output()`
-6. If timeout is exceeded AND terminal is still `processing`, raise a `TimeoutError`
+7. If timeout is exceeded AND terminal is still `processing`, raise a `TimeoutError`
 
 The Codex provider's terminal status detection SHALL use only Codex-specific UI patterns (`ACTIVE_WORK_UI_PATTERN`) — not generic English keyword matches (`PROCESSING_PATTERN`) — to override idle detection. Generic keywords like "running", "working", "executing" in agent narrative text SHALL NOT prevent idle or completed status from being reported.
 
@@ -93,6 +97,25 @@ The Codex provider's `USER_PREFIX_PATTERN` SHALL only match horizontal whitespac
 - **WHEN** the agent has started (agent_started = True) and terminal status alternates between `processing` and `idle`/`completed`
 - **THEN** `idle_since` SHALL reset to None on each `processing` observation
 - **AND** the grace timer only counts CONSECUTIVE idle/completed polls
+
+#### Scenario: Reminder sent on idle grace expiry
+- **WHEN** idle grace expires, no response file exists, and `reminders_sent < MAX_FILE_REMINDERS`
+- **THEN** the orchestrator SHALL send a reminder message to the agent with the response file path
+- **AND** reset the idle grace timer and re-arm the startup guard with a fresh `guard_since` timestamp
+- **AND** continue polling
+
+#### Scenario: Reminder startup guard uses fresh timestamp
+- **WHEN** a reminder is sent and the startup guard is re-armed
+- **THEN** the startup timeout SHALL be measured from the time the reminder was sent (`guard_since`), not from the original dispatch time (`start`)
+- **AND** the agent SHALL get a full `IDLE_GRACE_SECONDS` window to begin processing the reminder
+
+#### Scenario: All reminders exhausted in strict mode
+- **WHEN** idle grace expires, no response file exists, all reminders have been sent, and `STRICT_FILE_HANDOFF` is True
+- **THEN** the orchestrator SHALL raise a `RuntimeError`
+
+#### Scenario: All reminders exhausted in non-strict mode
+- **WHEN** idle grace expires, no response file exists, all reminders have been sent, and `STRICT_FILE_HANDOFF` is False
+- **THEN** the orchestrator SHALL fall back to `api.get_last_output()`
 
 #### Scenario: Narrative keyword does not block idle detection
 - **WHEN** Codex agent output contains the word "running" in narrative text (e.g., "stop running commands") AND the terminal shows a valid idle prompt with context footer

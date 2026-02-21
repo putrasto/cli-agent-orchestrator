@@ -70,6 +70,7 @@ _CONFIG_KEYS: list[tuple[str, str, object, type]] = [
     ("handoff.strict_file_handoff",                "STRICT_FILE_HANDOFF",                True,                   bool),
     ("handoff.idle_grace_seconds",                 "IDLE_GRACE_SECONDS",                 30,                     int),
     ("handoff.response_timeout",                   "RESPONSE_TIMEOUT",                   1800,                   int),
+    ("handoff.max_file_reminders",                 "MAX_FILE_REMINDERS",                 1,                      int),
     ("start_agent",                                "START_AGENT",                        "analyst",              str),
     ("post_processing.openspec_archive",           "POST_OPENSPEC_ARCHIVE",              False,                  bool),
     ("post_processing.git_commit",                 "POST_GIT_COMMIT",                    False,                  bool),
@@ -213,7 +214,7 @@ def _apply_config(cfg: dict) -> None:
     global MAX_FEEDBACK_LINES, MAX_TEST_EVIDENCE_LINES, CONDENSE_UPSTREAM_ON_REPEAT
     global CONDENSE_CROSS_PHASE, MAX_CROSS_PHASE_LINES
     global STATE_FILE, CLEANUP_ON_EXIT
-    global RESPONSE_TIMEOUT, IDLE_GRACE_SECONDS, STRICT_FILE_HANDOFF
+    global RESPONSE_TIMEOUT, IDLE_GRACE_SECONDS, STRICT_FILE_HANDOFF, MAX_FILE_REMINDERS
     global RESPONSE_DIR, AGENT_CONFIG, START_AGENT
     global POST_OPENSPEC_ARCHIVE, POST_GIT_COMMIT
 
@@ -242,6 +243,7 @@ def _apply_config(cfg: dict) -> None:
     RESPONSE_TIMEOUT = cfg["RESPONSE_TIMEOUT"]
     IDLE_GRACE_SECONDS = cfg["IDLE_GRACE_SECONDS"]
     STRICT_FILE_HANDOFF = cfg["STRICT_FILE_HANDOFF"]
+    MAX_FILE_REMINDERS = max(0, cfg["MAX_FILE_REMINDERS"])
     RESPONSE_DIR = Path(WD) / ".tmp" / "agent-responses"
     AGENT_CONFIG = cfg["_agent_config"]
     START_AGENT = cfg["START_AGENT"]
@@ -411,6 +413,20 @@ def response_file_instruction(role: str) -> str:
     )
 
 
+def _build_file_reminder(role: str) -> str:
+    """Build a short reminder message asking the agent to write its response file."""
+    p = response_path_for(role)
+    quoted = shlex.quote(str(p))
+    return (
+        "IMPORTANT: You have not written your response file yet. "
+        "The orchestrator is waiting for it. Please write your COMPLETE "
+        f"final response to: {p}\n"
+        f"Use: cat << 'AGENT_EOF' > {quoted}\n"
+        "...your full response...\n"
+        "AGENT_EOF"
+    )
+
+
 def wait_for_response_file(
     role: str,
     terminal_id: str,
@@ -431,11 +447,18 @@ def wait_for_response_file(
     at least once. This prevents false-positive idle detection when the CLI agent
     hasn't read the dispatched prompt yet. A startup timeout (IDLE_GRACE_SECONDS)
     serves as a fallback if the processing state is never observed.
+
+    File reminder: when idle grace expires without a response file, the orchestrator
+    sends a reminder message asking the agent to write the file (up to
+    MAX_FILE_REMINDERS times) before failing. The agent can queue the message even
+    while still processing.
     """
     p = response_path_for(role)
     start = time.monotonic()
+    guard_since = start  # Reset on reminder to avoid immediate startup timeout
     idle_since: float | None = None
     agent_started = False  # True once agent has demonstrably started processing
+    reminders_sent = 0
 
     while True:
         status = api.get_status(terminal_id)
@@ -459,7 +482,7 @@ def wait_for_response_file(
         if status in ("idle", "completed") and not p.exists():
             if not agent_started:
                 # Agent hasn't started yet — check startup timeout
-                startup_elapsed = time.monotonic() - start
+                startup_elapsed = time.monotonic() - guard_since
                 if startup_elapsed > IDLE_GRACE_SECONDS:
                     log(f"[{role}] Warning: agent never entered processing state after "
                         f"{IDLE_GRACE_SECONDS}s, enabling idle grace timer")
@@ -469,15 +492,28 @@ def wait_for_response_file(
             elif idle_since is None:
                 idle_since = time.monotonic()
             elif time.monotonic() - idle_since > IDLE_GRACE_SECONDS:
-                if STRICT_FILE_HANDOFF:
+                # Idle grace expired — try sending a reminder before giving up
+                if reminders_sent < MAX_FILE_REMINDERS:
+                    reminders_sent += 1
+                    reminder = _build_file_reminder(role)
+                    log(f"[{role}] Agent idle without response file — "
+                        f"sending reminder ({reminders_sent}/{MAX_FILE_REMINDERS})")
+                    api.send_input(terminal_id, reminder)
+                    idle_since = None  # Reset grace timer for next cycle
+                    agent_started = False  # Re-arm startup guard for reminder
+                    guard_since = time.monotonic()  # Fresh startup timeout window
+                elif STRICT_FILE_HANDOFF:
                     raise RuntimeError(
                         f"[{role}] Agent finished (idle {IDLE_GRACE_SECONDS}s) "
-                        f"but did not write response file "
+                        f"but did not write response file after "
+                        f"{reminders_sent} reminder(s) "
                         f"(STRICT_FILE_HANDOFF=1, no fallback)"
                     )
-                log(f"[{role}] Agent finished but no response file after "
-                    f"{IDLE_GRACE_SECONDS}s idle, falling back to get_last_output()")
-                return api.get_last_output(terminal_id)
+                else:
+                    log(f"[{role}] Agent finished but no response file after "
+                        f"{IDLE_GRACE_SECONDS}s idle and {reminders_sent} reminder(s), "
+                        f"falling back to get_last_output()")
+                    return api.get_last_output(terminal_id)
         else:
             idle_since = None  # Reset if terminal is processing or file appeared
 
