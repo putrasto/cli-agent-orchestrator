@@ -1,0 +1,201 @@
+# Codex 3-Agent Orchestrator Loop
+
+A Python orchestrator that coordinates 5 AI agent terminals (analyst, peer analyst, programmer, peer programmer, tester) through a structured development loop. Uses **file-based handoff** — each agent writes its response to a file, the orchestrator reads it and passes condensed content to the next agent. The orchestrator itself uses **zero LLM tokens**.
+
+## Prerequisites
+
+- CAO server installed and working (`uv sync` from project root)
+- Codex CLI installed and available in `$PATH`
+- A prompt file following the required template (see `prompt_template.md`)
+
+## 1. Start the CAO server
+
+```bash
+cao-server
+```
+
+The server runs on `http://localhost:9889` by default. Verify it's running:
+
+```bash
+curl -s http://localhost:9889/health
+```
+
+## 2. Create a prompt file
+
+Copy the template and fill in your task details:
+
+```bash
+cp prompt_template.md my_prompt.md
+# Edit my_prompt.md with your task
+```
+
+The prompt **must** contain both headers:
+- `*** ORIGINAL EXPLORE SUMMARY ***` — describes the business goal, scope, constraints
+- `*** SCENARIO TEST ***` — defines the test scenario with exact inputs, steps, and expected results
+
+## 3. Run the orchestrator loop
+
+```bash
+PROMPT_FILE=my_prompt.md python examples/codex-3agents/run_orchestrator_loop.py
+```
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Tester returned PASS |
+| 1 | All rounds exhausted without PASS, or fatal error |
+| 130 | Interrupted by SIGINT (Ctrl+C) |
+| 143 | Interrupted by SIGTERM |
+
+## Environment variables
+
+### Required
+
+| Variable | Description |
+|----------|-------------|
+| `PROMPT_FILE` | Path to prompt file (or set `PROMPT` inline) |
+
+### Common overrides
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `API` | `http://localhost:9889` | CAO server URL |
+| `PROVIDER` | `codex` | AI provider (`codex`, `claude_code`, `q_cli`, `kiro_cli`) |
+| `WD` | Current directory | Working directory for agents |
+| `MAX_ROUNDS` | `8` | Max analyst-programmer-tester loops |
+| `MAX_REVIEW_CYCLES` | `3` | Max peer review cycles per phase |
+| `PROJECT_TEST_CMD` | (empty) | Test command for programmer reviewer to run |
+| `CLEANUP_ON_EXIT` | `0` | Set `1` to exit all terminals on completion |
+
+### Token control
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONDENSE_CROSS_PHASE` | `1` | Extract only handoff sections when passing between phases |
+| `MAX_CROSS_PHASE_LINES` | `40` | Max lines in cross-phase condensed output |
+| `CONDENSE_UPSTREAM_ON_REPEAT` | `1` | Replace analyst output with back-reference on programmer cycle > 1 |
+| `CONDENSE_EXPLORE_ON_REPEAT` | `1` | Replace explore summary with back-reference on repeat sends |
+| `CONDENSE_REVIEW_FEEDBACK` | `1` | Extract only REVIEW_NOTES section from peer reviews |
+| `MAX_FEEDBACK_LINES` | `30` | Max lines in condensed feedback |
+| `STRICT_FILE_HANDOFF` | `1` | Fail if agent doesn't write response file (set `0` to fall back to terminal output) |
+
+### Resume control
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RESUME` | `0` | Set `1` to force resume from state file |
+| `STATE_FILE` | `.tmp/codex-3agents-loop-state.json` | Path to state file |
+
+Auto-resume: if a state file exists with `final_status=RUNNING`, the orchestrator resumes automatically without needing `RESUME=1`.
+
+## Scenarios
+
+### Quick single-round test
+
+```bash
+PROMPT_FILE=my_prompt.md MAX_ROUNDS=1 MAX_REVIEW_CYCLES=1 \
+  python examples/codex-3agents/run_orchestrator_loop.py
+```
+
+### With explicit test command
+
+```bash
+PROMPT_FILE=my_prompt.md PROJECT_TEST_CMD="pytest test/ -v" \
+  python examples/codex-3agents/run_orchestrator_loop.py
+```
+
+The test command is included in the programmer review prompt so the peer reviewer runs it before approving.
+
+### Resume after interruption
+
+If the orchestrator is interrupted (Ctrl+C), it saves state automatically. On next run it resumes from where it left off:
+
+```bash
+# First run — gets interrupted
+PROMPT_FILE=my_prompt.md python examples/codex-3agents/run_orchestrator_loop.py
+# ^C
+
+# Resumes automatically (state file has RUNNING status)
+PROMPT_FILE=my_prompt.md python examples/codex-3agents/run_orchestrator_loop.py
+```
+
+To force a fresh start after interruption:
+
+```bash
+rm .tmp/codex-3agents-loop-state.json
+PROMPT_FILE=my_prompt.md python examples/codex-3agents/run_orchestrator_loop.py
+```
+
+### Different working directory
+
+```bash
+PROMPT_FILE=my_prompt.md WD=/path/to/target/project \
+  python examples/codex-3agents/run_orchestrator_loop.py
+```
+
+### Non-strict mode (fallback to terminal output)
+
+If your AI provider doesn't reliably write response files, disable strict mode:
+
+```bash
+PROMPT_FILE=my_prompt.md STRICT_FILE_HANDOFF=0 \
+  python examples/codex-3agents/run_orchestrator_loop.py
+```
+
+This falls back to reading terminal output when the response file doesn't appear. Costs more tokens but is more tolerant.
+
+### Cleanup terminals on exit
+
+```bash
+PROMPT_FILE=my_prompt.md CLEANUP_ON_EXIT=1 \
+  python examples/codex-3agents/run_orchestrator_loop.py
+```
+
+Without this, terminals persist in tmux after the orchestrator exits. This is useful for debugging — you can inspect what each agent did by attaching to the tmux session.
+
+## How it works
+
+```
+Round N:
+  Analyst ──review──> Peer Analyst ──(cycle until approved)──>
+  Programmer ──review──> Peer Programmer ──(cycle until approved)──>
+  Tester ──PASS──> exit 0
+         ──FAIL──> Round N+1 (with test feedback)
+```
+
+1. **Analyst** receives the explore summary, scenario test, and any previous test feedback. Produces an `ANALYST_SUMMARY` with scope, artifacts, implementation notes, and risks.
+
+2. **Peer Analyst** reviews the analyst output against a checklist. Returns `REVIEW_RESULT: APPROVED` or `REVIEW_RESULT: REVISE` with notes. Cycles until approved or `MAX_REVIEW_CYCLES` reached.
+
+3. **Programmer** receives condensed analyst handoff (implementation notes + risks only). Implements the changes. Produces a `PROGRAMMER_SUMMARY` with files changed and behavior implemented.
+
+4. **Peer Programmer** reviews the implementation with full programmer output. Optionally runs `PROJECT_TEST_CMD`. Cycles until approved or `MAX_REVIEW_CYCLES` reached.
+
+5. **Tester** receives condensed programmer handoff (files changed + behavior only). Runs the scenario test. Returns `RESULT: PASS` or `RESULT: FAIL` with evidence.
+
+### File-based handoff
+
+Each agent prompt includes a `RESPONSE FILE INSTRUCTION` block telling the agent to write its final response to a specific file under `.tmp/agent-responses/`:
+
+| Agent | Response file |
+|-------|---------------|
+| Analyst | `analyst_summary.md` |
+| Peer Analyst | `analyst_review.md` |
+| Programmer | `programmer_summary.md` |
+| Peer Programmer | `programmer_review.md` |
+| Tester | `test_result.md` |
+
+The orchestrator polls: file exists AND terminal idle → read, delete, proceed.
+
+## Agent profiles
+
+The agent profiles (`.md` files in this directory) define each agent's system prompt:
+
+| File | Role |
+|------|------|
+| `system_analyst.md` | Analyst — explores codebase, creates OpenSpec artifacts |
+| `peer_system_analyst.md` | Peer Analyst — reviews analyst work against checklist |
+| `programmer.md` | Programmer — implements changes via OpenSpec apply |
+| `peer_programmer.md` | Peer Programmer — reviews implementation, runs tests |
+| `tester.md` | Tester — runs scenario test, reports PASS/FAIL |
