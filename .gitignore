@@ -29,3 +29,4 @@ dist/
 
 # Memory
 context/
+.tmp
