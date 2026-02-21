@@ -58,9 +58,9 @@ Key layers:
 | Providers | `src/cli_agent_orchestrator/providers/{codex,q_cli,kiro_cli,claude_code}.py` |
 | Terminal service | `src/cli_agent_orchestrator/services/terminal_service.py` |
 | Constants | `src/cli_agent_orchestrator/constants.py` |
-| 3-agent orchestrator (shell) | `examples/codex-3agents/run_orchestrator_loop.sh` |
-| 3-agent orchestrator (Python) | `examples/codex-3agents/run_orchestrator_loop.py` |
-| Agent profiles | `examples/codex-3agents/{system_analyst,peer_system_analyst,programmer,peer_programmer,tester}.md` |
+| 3-agent orchestrator (shell) | `examples/agnostic-3agents/run_orchestrator_loop.sh` |
+| 3-agent orchestrator (Python) | `examples/agnostic-3agents/run_orchestrator_loop.py` |
+| Agent profiles | `examples/agnostic-3agents/{system_analyst,peer_system_analyst,programmer,peer_programmer,tester}.md` |
 | Orchestrator tests | `test/examples/test_orchestrator_loop_unit.py` |
 
 ## Coding conventions

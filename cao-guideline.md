@@ -12,7 +12,7 @@ Roles
 - `system_analyst`
   - Explore the codebase and requirements.
   - Use OpenSpec to create/update all required OpenSpec artifacts.
-  - Use `ff` command as the standard execution method for exploration/artifact creation.
+  - Use the OpenSpec fast-forward skill as the standard execution method for exploration/artifact creation.
   - Guard line: `system anaylist: dont do testing, dont implement code`
 - `programmer`
   - Apply implementation changes from OpenSpec artifacts.
@@ -77,7 +77,7 @@ Prompt Template
 ```
 
 Recommended detailed template:
-- `examples/codex-3agents/prompt_template.md`
+- `examples/agnostic-3agents/prompt_template.md`
 - Use your OpenSpec explore findings as the `ORIGINAL EXPLORE SUMMARY`.
 - Use real input data + exact expected result in `SCENARIO TEST`.
 
@@ -99,11 +99,11 @@ CAO_ENABLE_WORKING_DIRECTORY=true cao-server
 2) Install the 3 agent profiles (terminal B)
 ```bash
 cd ~/project/cli-agent-orchestrator
-cao install examples/codex-3agents/system_analyst.md --provider codex
-cao install examples/codex-3agents/peer_system_analyst.md --provider codex
-cao install examples/codex-3agents/programmer.md --provider codex
-cao install examples/codex-3agents/peer_programmer.md --provider codex
-cao install examples/codex-3agents/tester.md --provider codex
+cao install examples/agnostic-3agents/system_analyst.md --provider codex
+cao install examples/agnostic-3agents/peer_system_analyst.md --provider codex
+cao install examples/agnostic-3agents/programmer.md --provider codex
+cao install examples/agnostic-3agents/peer_programmer.md --provider codex
+cao install examples/agnostic-3agents/tester.md --provider codex
 ```
 
 3) Run one-prompt orchestrator loop (terminal B)
@@ -113,7 +113,7 @@ PROMPT_FILE="$PWD/path/to/your_prompt.txt" \
 WD="$PWD" \
 MAX_ROUNDS=8 \
 MAX_REVIEW_CYCLES=3 \
-examples/codex-3agents/run_orchestrator_loop.sh
+python examples/agnostic-3agents/run_orchestrator_loop.py
 ```
 
 Optional: inline `PROMPT` still works if needed.

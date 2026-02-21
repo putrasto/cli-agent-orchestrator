@@ -586,7 +586,7 @@ while (( CURRENT_ROUND <= MAX_ROUNDS )); do
         "" \
         "Task:" \
         "1) Explore the codebase." \
-        "2) Create/update all OpenSpec artifacts using ff command." \
+        "2) Create/update all OpenSpec artifacts using the OpenSpec fast-forward skill." \
         "3) Return ANALYST_SUMMARY exactly as profile format." \
         "4) Include mandatory sections in ANALYST_SUMMARY:" \
         "   - Artifact review per file: proposal.md, design.md, tasks.md, specs/* (PASS|REVISE + evidence)." \

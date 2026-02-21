@@ -65,7 +65,7 @@ uv run mypy src/
 
 ## Notes for Orchestrator Example
 
-- For `examples/codex-3agents/run_orchestrator_loop.py`, use file-based response handoff.
+- For `examples/agnostic-3agents/run_orchestrator_loop.py`, use file-based response handoff.
 - If strict file-only handoff is required, set:
 
 ```bash

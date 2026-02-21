@@ -1,11 +1,11 @@
-# Codex 3-Agent Orchestrator Loop
+# 3-Agent Orchestrator Loop
 
 A Python orchestrator that coordinates 5 AI agent terminals (analyst, peer analyst, programmer, peer programmer, tester) through a structured development loop. Uses **file-based handoff** — each agent writes its response to a file, the orchestrator reads it and passes condensed content to the next agent. The orchestrator itself uses **zero LLM tokens**.
 
 ## Prerequisites
 
 - CAO server installed and working (`uv sync` from project root)
-- Codex CLI installed and available in `$PATH`
+- An AI CLI agent installed and available in `$PATH` (Claude Code, Codex, Q CLI, or Kiro CLI)
 - A prompt file following the required template (see `prompt_template.md`)
 
 ## 1. Start the CAO server
@@ -40,7 +40,7 @@ The orchestrator runs **against a target project**, not from within it. You must
 ```bash
 PROMPT_FILE="/path/to/your/project/.tmp/prompt.txt" \
 WD="/path/to/your/project" \
-  python examples/codex-3agents/run_orchestrator_loop.py
+  python examples/agnostic-3agents/run_orchestrator_loop.py
 ```
 
 Full recommended invocation with token-efficient settings:
@@ -53,7 +53,7 @@ MAX_ROUNDS=3 \
 MAX_REVIEW_CYCLES=2 \
 MIN_REVIEW_CYCLES_BEFORE_APPROVAL=1 \
 CLEANUP_ON_EXIT=1 \
-  python examples/codex-3agents/run_orchestrator_loop.py
+  python examples/agnostic-3agents/run_orchestrator_loop.py
 ```
 
 - `WD` — the project the agents will explore, modify, and test. Response files and state are written under `WD/.tmp/`.
@@ -121,7 +121,7 @@ Auto-resume: if a state file exists with `final_status=RUNNING`, the orchestrato
 WD=/path/to/project \
 PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
 MAX_ROUNDS=1 MAX_REVIEW_CYCLES=1 \
-  python examples/codex-3agents/run_orchestrator_loop.py
+  python examples/agnostic-3agents/run_orchestrator_loop.py
 ```
 
 ### With explicit test command
@@ -130,7 +130,7 @@ MAX_ROUNDS=1 MAX_REVIEW_CYCLES=1 \
 WD=/path/to/project \
 PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
 PROJECT_TEST_CMD="conda run -n myenv pytest -q" \
-  python examples/codex-3agents/run_orchestrator_loop.py
+  python examples/agnostic-3agents/run_orchestrator_loop.py
 ```
 
 The test command is included in the programmer review prompt so the peer reviewer runs it before approving. Use the full command including any environment activation (e.g. `conda run`, `poetry run`).
@@ -142,12 +142,12 @@ If the orchestrator is interrupted (Ctrl+C), it saves state automatically. On ne
 ```bash
 # First run — gets interrupted
 WD=/path/to/project PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
-  python examples/codex-3agents/run_orchestrator_loop.py
+  python examples/agnostic-3agents/run_orchestrator_loop.py
 # ^C
 
 # Resumes automatically (state file has RUNNING status)
 WD=/path/to/project PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
-  python examples/codex-3agents/run_orchestrator_loop.py
+  python examples/agnostic-3agents/run_orchestrator_loop.py
 ```
 
 To force a fresh start after interruption:
@@ -164,7 +164,7 @@ If your AI provider doesn't reliably write response files, disable strict mode:
 WD=/path/to/project \
 PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
 STRICT_FILE_HANDOFF=0 \
-  python examples/codex-3agents/run_orchestrator_loop.py
+  python examples/agnostic-3agents/run_orchestrator_loop.py
 ```
 
 This falls back to reading terminal output when the response file doesn't appear. Costs more tokens but is more tolerant.

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 # Add the examples directory so we can import the module
-EXAMPLES_DIR = Path(__file__).resolve().parent.parent.parent / "examples" / "codex-3agents"
+EXAMPLES_DIR = Path(__file__).resolve().parent.parent.parent / "examples" / "agnostic-3agents"
 sys.path.insert(0, str(EXAMPLES_DIR))
 
 import run_orchestrator_loop as orch
