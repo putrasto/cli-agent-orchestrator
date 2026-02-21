@@ -685,15 +685,28 @@ class TestFileHandoff:
 
     def test_clear_stale_response(self, tmp_path):
         original_dir = orch.RESPONSE_DIR
+        original_wd = orch.WD
+        original_ts = orch._run_timestamp
+        original_seq = orch._response_seq
         try:
             orch.RESPONSE_DIR = tmp_path
+            orch.WD = str(tmp_path)
+            orch._run_timestamp = "2026-01-01T00-00-00"
+            orch._response_seq = 0
             f = tmp_path / "analyst_summary.md"
             f.write_text("stale data")
             orch.RESPONSE_FILES["analyst"] = "analyst_summary.md"
             orch.clear_stale_response("analyst")
             assert not f.exists()
+            # Should be archived, not deleted
+            archived = tmp_path / ".tmp" / "2026-01-01T00-00-00" / "001-analyst-stale.md"
+            assert archived.exists()
+            assert archived.read_text() == "stale data"
         finally:
             orch.RESPONSE_DIR = original_dir
+            orch.WD = original_wd
+            orch._run_timestamp = original_ts
+            orch._response_seq = original_seq
 
     def test_clear_stale_response_no_file(self, tmp_path):
         original_dir = orch.RESPONSE_DIR
@@ -706,13 +719,17 @@ class TestFileHandoff:
 
     def test_ensure_response_dir(self, tmp_path):
         original_dir = orch.RESPONSE_DIR
+        original_ts = orch._run_timestamp
         try:
             new_dir = tmp_path / "nested" / "agent-responses"
             orch.RESPONSE_DIR = new_dir
+            orch._run_timestamp = ""
             orch.ensure_response_dir()
             assert new_dir.is_dir()
+            assert orch._run_timestamp  # should be set after ensure_response_dir
         finally:
             orch.RESPONSE_DIR = original_dir
+            orch._run_timestamp = original_ts
 
 
 # ── test_command_instruction ────────────────────────────────────────────────
@@ -749,16 +766,25 @@ class TestWaitForResponseFile:
         self._orig_strict = orch.STRICT_FILE_HANDOFF
         self._orig_poll = orch.POLL_SECONDS
         self._orig_grace = orch.IDLE_GRACE_SECONDS
+        self._orig_wd = orch.WD
+        self._orig_ts = orch._run_timestamp
+        self._orig_seq = orch._response_seq
 
     def teardown_method(self):
         orch.RESPONSE_DIR = self._orig_dir
         orch.STRICT_FILE_HANDOFF = self._orig_strict
         orch.POLL_SECONDS = self._orig_poll
         orch.IDLE_GRACE_SECONDS = self._orig_grace
+        orch.WD = self._orig_wd
+        orch._run_timestamp = self._orig_ts
+        orch._response_seq = self._orig_seq
 
     @patch.object(orch.api, "get_status")
     def test_file_exists_and_idle_returns_content(self, mock_status, tmp_path):
         orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "2026-01-01T00-00-00"
+        orch._response_seq = 0
         resp_file = tmp_path / "analyst_summary.md"
         resp_file.write_text("ANALYST_SUMMARY:\nGood analysis.")
         mock_status.return_value = "idle"
@@ -766,12 +792,18 @@ class TestWaitForResponseFile:
         result = orch.wait_for_response_file("analyst", "term-001", timeout=5)
         assert "ANALYST_SUMMARY" in result
         assert "Good analysis." in result
-        assert not resp_file.exists()  # file should be deleted after read
+        assert not resp_file.exists()  # moved, not at original location
+        # Verify archived
+        archived = tmp_path / ".tmp" / "2026-01-01T00-00-00" / "001-analyst.md"
+        assert archived.exists()
 
     @patch.object(orch.api, "get_status")
     def test_waits_for_idle_before_reading(self, mock_status, tmp_path):
         """File exists but terminal still processing — should wait."""
         orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
         orch.POLL_SECONDS = 0  # no sleep in test
         resp_file = tmp_path / "analyst_summary.md"
         resp_file.write_text("ANALYST_SUMMARY:\nContent here.")

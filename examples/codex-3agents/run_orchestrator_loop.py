@@ -143,6 +143,27 @@ api = ApiClient(API)
 
 # ── 5. File handoff functions ───────────────────────────────────────────────
 
+_run_timestamp: str = ""
+_response_seq: int = 0
+
+
+def _archive_dir() -> Path:
+    """Return the per-run archive directory under .tmp/<timestamp>/."""
+    return Path(WD) / ".tmp" / _run_timestamp
+
+
+def _archive_response(p: Path, role: str) -> None:
+    """Move a response file to the per-run archive instead of deleting it."""
+    global _response_seq
+    if not p.exists():
+        return
+    _response_seq += 1
+    dest_dir = _archive_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{_response_seq:03d}-{role}.md"
+    p.rename(dest)
+    log(f"Archived response: {dest.name}")
+
 
 def response_path_for(role: str) -> Path:
     return RESPONSE_DIR / RESPONSE_FILES[role]
@@ -151,11 +172,14 @@ def response_path_for(role: str) -> Path:
 def clear_stale_response(role: str) -> None:
     p = response_path_for(role)
     if p.exists():
-        p.unlink()
+        _archive_response(p, f"{role}-stale")
 
 
 def ensure_response_dir() -> None:
+    global _run_timestamp
     RESPONSE_DIR.mkdir(parents=True, exist_ok=True)
+    if not _run_timestamp:
+        _run_timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
 
 def response_file_instruction(role: str) -> str:
@@ -201,7 +225,7 @@ def wait_for_response_file(
 
         if p.exists() and status in ("idle", "completed"):
             content = p.read_text(encoding="utf-8").strip()
-            p.unlink(missing_ok=True)
+            _archive_response(p, role)
             if content:
                 return content
             # File was empty — fall through to timeout/fallback logic
