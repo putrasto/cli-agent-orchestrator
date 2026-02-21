@@ -35,9 +35,30 @@ The prompt **must** contain both headers:
 
 ## 3. Run the orchestrator loop
 
+The orchestrator runs **against a target project**, not from within it. You must set `WD` to point at the project you want the agents to work on, and `PROMPT_FILE` to a prompt describing the task.
+
 ```bash
-PROMPT_FILE=my_prompt.md python examples/codex-3agents/run_orchestrator_loop.py
+PROMPT_FILE="/path/to/your/project/.tmp/prompt.txt" \
+WD="/path/to/your/project" \
+  python examples/codex-3agents/run_orchestrator_loop.py
 ```
+
+Full recommended invocation with token-efficient settings:
+
+```bash
+PROMPT_FILE="/path/to/your/project/.tmp/prompt.txt" \
+WD="/path/to/your/project" \
+PROJECT_TEST_CMD="pytest -q" \
+MAX_ROUNDS=3 \
+MAX_REVIEW_CYCLES=2 \
+MIN_REVIEW_CYCLES_BEFORE_APPROVAL=1 \
+CLEANUP_ON_EXIT=1 \
+  python examples/codex-3agents/run_orchestrator_loop.py
+```
+
+- `WD` — the project the agents will explore, modify, and test. Response files and state are written under `WD/.tmp/`.
+- `PROMPT_FILE` — absolute path to the prompt file (can live anywhere, but keeping it in `WD/.tmp/` is convenient).
+- `PROJECT_TEST_CMD` — the command the peer programmer runs to validate the implementation.
 
 ### Exit codes
 
@@ -54,7 +75,8 @@ PROMPT_FILE=my_prompt.md python examples/codex-3agents/run_orchestrator_loop.py
 
 | Variable | Description |
 |----------|-------------|
-| `PROMPT_FILE` | Path to prompt file (or set `PROMPT` inline) |
+| `WD` | **Target project directory** — the codebase agents will work on. Response files, state, and agent outputs are written under `WD/.tmp/`. Defaults to current directory if not set. |
+| `PROMPT_FILE` | Absolute path to prompt file (or set `PROMPT` inline) |
 
 ### Common overrides
 
@@ -62,9 +84,9 @@ PROMPT_FILE=my_prompt.md python examples/codex-3agents/run_orchestrator_loop.py
 |----------|---------|-------------|
 | `API` | `http://localhost:9889` | CAO server URL |
 | `PROVIDER` | `codex` | AI provider (`codex`, `claude_code`, `q_cli`, `kiro_cli`) |
-| `WD` | Current directory | Working directory for agents |
-| `MAX_ROUNDS` | `8` | Max analyst-programmer-tester loops |
-| `MAX_REVIEW_CYCLES` | `3` | Max peer review cycles per phase |
+| `MAX_ROUNDS` | `8` | Max analyst-programmer-tester loops (recommended: `3`) |
+| `MAX_REVIEW_CYCLES` | `3` | Max peer review cycles per phase (recommended: `2`) |
+| `MIN_REVIEW_CYCLES_BEFORE_APPROVAL` | `2` | Min cycles before peer can approve (recommended: `1`) |
 | `PROJECT_TEST_CMD` | (empty) | Test command for programmer reviewer to run |
 | `CLEANUP_ON_EXIT` | `0` | Set `1` to exit all terminals on completion |
 
@@ -94,18 +116,22 @@ Auto-resume: if a state file exists with `final_status=RUNNING`, the orchestrato
 ### Quick single-round test
 
 ```bash
-PROMPT_FILE=my_prompt.md MAX_ROUNDS=1 MAX_REVIEW_CYCLES=1 \
+WD=/path/to/project \
+PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
+MAX_ROUNDS=1 MAX_REVIEW_CYCLES=1 \
   python examples/codex-3agents/run_orchestrator_loop.py
 ```
 
 ### With explicit test command
 
 ```bash
-PROMPT_FILE=my_prompt.md PROJECT_TEST_CMD="pytest test/ -v" \
+WD=/path/to/project \
+PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
+PROJECT_TEST_CMD="conda run -n myenv pytest -q" \
   python examples/codex-3agents/run_orchestrator_loop.py
 ```
 
-The test command is included in the programmer review prompt so the peer reviewer runs it before approving.
+The test command is included in the programmer review prompt so the peer reviewer runs it before approving. Use the full command including any environment activation (e.g. `conda run`, `poetry run`).
 
 ### Resume after interruption
 
@@ -113,25 +139,19 @@ If the orchestrator is interrupted (Ctrl+C), it saves state automatically. On ne
 
 ```bash
 # First run — gets interrupted
-PROMPT_FILE=my_prompt.md python examples/codex-3agents/run_orchestrator_loop.py
+WD=/path/to/project PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
+  python examples/codex-3agents/run_orchestrator_loop.py
 # ^C
 
 # Resumes automatically (state file has RUNNING status)
-PROMPT_FILE=my_prompt.md python examples/codex-3agents/run_orchestrator_loop.py
+WD=/path/to/project PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
+  python examples/codex-3agents/run_orchestrator_loop.py
 ```
 
 To force a fresh start after interruption:
 
 ```bash
-rm .tmp/codex-3agents-loop-state.json
-PROMPT_FILE=my_prompt.md python examples/codex-3agents/run_orchestrator_loop.py
-```
-
-### Different working directory
-
-```bash
-PROMPT_FILE=my_prompt.md WD=/path/to/target/project \
-  python examples/codex-3agents/run_orchestrator_loop.py
+rm /path/to/project/.tmp/codex-3agents-loop-state.json
 ```
 
 ### Non-strict mode (fallback to terminal output)
@@ -139,7 +159,9 @@ PROMPT_FILE=my_prompt.md WD=/path/to/target/project \
 If your AI provider doesn't reliably write response files, disable strict mode:
 
 ```bash
-PROMPT_FILE=my_prompt.md STRICT_FILE_HANDOFF=0 \
+WD=/path/to/project \
+PROMPT_FILE=/path/to/project/.tmp/prompt.txt \
+STRICT_FILE_HANDOFF=0 \
   python examples/codex-3agents/run_orchestrator_loop.py
 ```
 
@@ -147,12 +169,7 @@ This falls back to reading terminal output when the response file doesn't appear
 
 ### Cleanup terminals on exit
 
-```bash
-PROMPT_FILE=my_prompt.md CLEANUP_ON_EXIT=1 \
-  python examples/codex-3agents/run_orchestrator_loop.py
-```
-
-Without this, terminals persist in tmux after the orchestrator exits. This is useful for debugging — you can inspect what each agent did by attaching to the tmux session.
+By default, terminals persist in tmux after the orchestrator exits — useful for debugging (you can inspect what each agent did by attaching to the tmux session). Set `CLEANUP_ON_EXIT=1` to exit all terminals on completion.
 
 ## How it works
 
