@@ -2101,3 +2101,221 @@ class TestMaxTestEvidenceLinesConfig:
         monkeypatch.setenv("MAX_TEST_EVIDENCE_LINES", "60")
         cfg = orch.load_config(argv=["prog", str(cfg_file)])
         assert cfg["MAX_TEST_EVIDENCE_LINES"] == 60
+
+
+# ── Post-processing tests ──────────────────────────────────────────────────
+
+
+class TestDetectActiveChange:
+    def test_exactly_one_change(self, tmp_path):
+        changes_dir = tmp_path / "openspec" / "changes"
+        (changes_dir / "fix-auth").mkdir(parents=True)
+        (changes_dir / "archive").mkdir()
+        assert orch.detect_active_change(str(tmp_path)) == "fix-auth"
+
+    def test_no_active_changes(self, tmp_path):
+        changes_dir = tmp_path / "openspec" / "changes"
+        (changes_dir / "archive").mkdir(parents=True)
+        assert orch.detect_active_change(str(tmp_path)) is None
+
+    def test_empty_changes_dir(self, tmp_path):
+        (tmp_path / "openspec" / "changes").mkdir(parents=True)
+        assert orch.detect_active_change(str(tmp_path)) is None
+
+    def test_multiple_active_changes(self, tmp_path):
+        changes_dir = tmp_path / "openspec" / "changes"
+        (changes_dir / "fix-auth").mkdir(parents=True)
+        (changes_dir / "add-feature").mkdir()
+        assert orch.detect_active_change(str(tmp_path)) is None
+
+    def test_no_changes_directory(self, tmp_path):
+        assert orch.detect_active_change(str(tmp_path)) is None
+
+
+class TestPostOpenspecArchive:
+    def test_success(self, tmp_path, monkeypatch):
+        changes_dir = tmp_path / "openspec" / "changes"
+        (changes_dir / "fix-auth").mkdir(parents=True)
+        monkeypatch.setattr(orch, "POST_OPENSPEC_ARCHIVE", True)
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            result = orch.post_openspec_archive(str(tmp_path))
+        assert result == "success"
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        assert args == ["openspec", "archive", "fix-auth", "--yes"]
+
+    def test_failure(self, tmp_path, monkeypatch):
+        changes_dir = tmp_path / "openspec" / "changes"
+        (changes_dir / "fix-auth").mkdir(parents=True)
+        monkeypatch.setattr(orch, "POST_OPENSPEC_ARCHIVE", True)
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="archive error")
+            result = orch.post_openspec_archive(str(tmp_path))
+        assert result == "failed"
+
+    def test_skipped_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(orch, "POST_OPENSPEC_ARCHIVE", False)
+        assert orch.post_openspec_archive("/any/path") == "skipped"
+
+    def test_skipped_no_active_change(self, tmp_path, monkeypatch):
+        (tmp_path / "openspec" / "changes").mkdir(parents=True)
+        monkeypatch.setattr(orch, "POST_OPENSPEC_ARCHIVE", True)
+        assert orch.post_openspec_archive(str(tmp_path)) == "skipped"
+
+    def test_failed_openspec_not_found(self, tmp_path, monkeypatch):
+        changes_dir = tmp_path / "openspec" / "changes"
+        (changes_dir / "fix-auth").mkdir(parents=True)
+        monkeypatch.setattr(orch, "POST_OPENSPEC_ARCHIVE", True)
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            result = orch.post_openspec_archive(str(tmp_path))
+        assert result == "failed"
+
+
+class TestPostGitCommit:
+    def test_success(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", True)
+        with patch("subprocess.run") as mock_run:
+            # git rev-parse (is git repo), git add, git diff --cached (has changes), git commit
+            mock_run.side_effect = [
+                MagicMock(returncode=0),  # git rev-parse
+                MagicMock(returncode=0),  # git add -A
+                MagicMock(returncode=1),  # git diff --cached --quiet (has changes)
+                MagicMock(returncode=0, stdout="", stderr=""),  # git commit
+            ]
+            result = orch.post_git_commit(str(tmp_path))
+        assert result is True
+        assert mock_run.call_count == 4
+
+    def test_no_changes(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", True)
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0),  # git rev-parse
+                MagicMock(returncode=0),  # git add -A
+                MagicMock(returncode=0),  # git diff --cached --quiet (no changes)
+            ]
+            result = orch.post_git_commit(str(tmp_path))
+        assert result is True
+        assert mock_run.call_count == 3
+
+    def test_not_a_git_repo(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", True)
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=128)  # git rev-parse fails
+            result = orch.post_git_commit(str(tmp_path))
+        assert result is True
+        assert mock_run.call_count == 1
+
+    def test_commit_fails(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", True)
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0),  # git rev-parse
+                MagicMock(returncode=0),  # git add -A
+                MagicMock(returncode=1),  # git diff --cached --quiet (has changes)
+                MagicMock(returncode=1, stdout="", stderr="commit failed"),  # git commit
+            ]
+            result = orch.post_git_commit(str(tmp_path))
+        assert result is False
+
+    def test_git_add_fails(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", True)
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0),  # git rev-parse
+                MagicMock(returncode=128, stdout="", stderr="add failed"),  # git add -A
+            ]
+            result = orch.post_git_commit(str(tmp_path))
+        assert result is False
+        assert mock_run.call_count == 2
+
+    def test_git_diff_error_exit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", True)
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0),  # git rev-parse
+                MagicMock(returncode=0),  # git add -A
+                MagicMock(returncode=129, stdout="", stderr="diff error"),  # git diff error
+            ]
+            result = orch.post_git_commit(str(tmp_path))
+        assert result is False
+        assert mock_run.call_count == 3
+
+    def test_skipped_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", False)
+        result = orch.post_git_commit("/any/path")
+        assert result is True
+
+
+class TestRunPostProcessing:
+    def test_both_disabled_is_noop(self, monkeypatch):
+        monkeypatch.setattr(orch, "POST_OPENSPEC_ARCHIVE", False)
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", False)
+        with patch.object(orch, "post_openspec_archive") as mock_archive, \
+             patch.object(orch, "post_git_commit") as mock_commit:
+            orch.run_post_processing("/any")
+        mock_archive.assert_not_called()
+        mock_commit.assert_not_called()
+
+    def test_archive_before_commit(self, monkeypatch):
+        monkeypatch.setattr(orch, "POST_OPENSPEC_ARCHIVE", True)
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", True)
+        call_order = []
+        with patch.object(orch, "post_openspec_archive", side_effect=lambda wd: (call_order.append("archive"), "success")[1]) as mock_archive, \
+             patch.object(orch, "post_git_commit", side_effect=lambda wd: (call_order.append("commit"), True)[1]) as mock_commit:
+            orch.run_post_processing("/wd")
+        assert call_order == ["archive", "commit"]
+
+    def test_archive_failure_skips_commit(self, monkeypatch):
+        monkeypatch.setattr(orch, "POST_OPENSPEC_ARCHIVE", True)
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", True)
+        with patch.object(orch, "post_openspec_archive", return_value="failed"), \
+             patch.object(orch, "post_git_commit") as mock_commit:
+            orch.run_post_processing("/wd")
+        mock_commit.assert_not_called()
+
+    def test_archive_skipped_still_allows_commit(self, monkeypatch):
+        monkeypatch.setattr(orch, "POST_OPENSPEC_ARCHIVE", True)
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", True)
+        with patch.object(orch, "post_openspec_archive", return_value="skipped"), \
+             patch.object(orch, "post_git_commit") as mock_commit:
+            orch.run_post_processing("/wd")
+        mock_commit.assert_called_once_with("/wd")
+
+    def test_only_commit_enabled(self, monkeypatch):
+        monkeypatch.setattr(orch, "POST_OPENSPEC_ARCHIVE", False)
+        monkeypatch.setattr(orch, "POST_GIT_COMMIT", True)
+        with patch.object(orch, "post_openspec_archive") as mock_archive, \
+             patch.object(orch, "post_git_commit") as mock_commit:
+            orch.run_post_processing("/wd")
+        # archive returns "skipped" when disabled, commit still runs
+        mock_commit.assert_called_once()
+
+
+class TestPostProcessingConfig:
+    def test_defaults_to_disabled(self):
+        cfg = orch.load_config(argv=["prog"])
+        assert cfg["POST_OPENSPEC_ARCHIVE"] is False
+        assert cfg["POST_GIT_COMMIT"] is False
+
+    def test_json_enables_post_processing(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({
+            "post_processing": {
+                "openspec_archive": True,
+                "git_commit": True,
+            }
+        }))
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["POST_OPENSPEC_ARCHIVE"] is True
+        assert cfg["POST_GIT_COMMIT"] is True
+
+    def test_env_var_overrides_json(self, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({
+            "post_processing": {"openspec_archive": False}
+        }))
+        monkeypatch.setenv("POST_OPENSPEC_ARCHIVE", "1")
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["POST_OPENSPEC_ARCHIVE"] is True

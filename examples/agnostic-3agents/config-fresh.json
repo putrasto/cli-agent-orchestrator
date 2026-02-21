@@ -38,6 +38,11 @@
     "response_timeout": 1800
   },
 
+  "post_processing": {
+    "openspec_archive": false,
+    "git_commit": false
+  },
+
   "start_agent": "analyst",
   "cleanup_on_exit": false,
   "resume": false

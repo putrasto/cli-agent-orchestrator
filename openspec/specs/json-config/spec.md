@@ -47,7 +47,7 @@ The orchestrator SHALL apply configuration in this order (highest to lowest prio
 - **THEN** the effective `START_AGENT` SHALL be `tester`
 
 ### Requirement: JSON structure with nested sections
-The JSON config file SHALL support these top-level keys: `api`, `provider`, `wd`, `prompt`, `prompt_file`, `project_test_cmd`, `start_agent`, `agents`, `limits`, `condensation`, `handoff`, `cleanup_on_exit`, `resume`, `state_file`. Nested sections SHALL map to flat config keys:
+The JSON config file SHALL support these top-level keys: `api`, `provider`, `wd`, `prompt`, `prompt_file`, `project_test_cmd`, `start_agent`, `agents`, `limits`, `condensation`, `handoff`, `post_processing`, `cleanup_on_exit`, `resume`, `state_file`. Nested sections SHALL map to flat config keys:
 - `start_agent` → `START_AGENT`
 - `limits.max_rounds` → `MAX_ROUNDS`
 - `limits.max_review_cycles` → `MAX_REVIEW_CYCLES`
@@ -65,6 +65,8 @@ The JSON config file SHALL support these top-level keys: `api`, `provider`, `wd`
 - `handoff.strict_file_handoff` → `STRICT_FILE_HANDOFF`
 - `handoff.idle_grace_seconds` → `IDLE_GRACE_SECONDS`
 - `handoff.response_timeout` → `RESPONSE_TIMEOUT`
+- `post_processing.openspec_archive` → `POST_OPENSPEC_ARCHIVE`
+- `post_processing.git_commit` → `POST_GIT_COMMIT`
 
 #### Scenario: Nested limits section maps correctly
 - **WHEN** JSON contains `{"limits": {"max_rounds": 3, "max_review_cycles": 2}}`
@@ -77,6 +79,14 @@ The JSON config file SHALL support these top-level keys: `api`, `provider`, `wd`
 #### Scenario: Condensation section maps test evidence limit
 - **WHEN** JSON contains `{"condensation": {"max_test_evidence_lines": 80}}`
 - **THEN** `MAX_TEST_EVIDENCE_LINES` SHALL be 80
+
+#### Scenario: Post-processing section maps correctly
+- **WHEN** JSON contains `{"post_processing": {"openspec_archive": true, "git_commit": true}}`
+- **THEN** `POST_OPENSPEC_ARCHIVE` SHALL be true and `POST_GIT_COMMIT` SHALL be true
+
+#### Scenario: Post-processing defaults to disabled
+- **WHEN** JSON has no `post_processing` section
+- **THEN** `POST_OPENSPEC_ARCHIVE` SHALL be false and `POST_GIT_COMMIT` SHALL be false
 
 ### Requirement: Per-agent provider and profile configuration
 The `agents` section SHALL map each of the 5 roles to an object with optional `provider` and `profile` fields. If `agents` is omitted, all roles SHALL use the top-level `provider` default and their default profile. If a role's `provider` is omitted, it SHALL inherit the top-level `provider`. If a role's `profile` is omitted, it SHALL use the default profile for that role.
@@ -134,7 +144,7 @@ The orchestrator directory SHALL include sample JSON config files demonstrating 
 
 #### Scenario: Fresh config sample exists
 - **WHEN** a user looks for a config example
-- **THEN** `config-fresh.json` SHALL exist with all sections populated including mixed-provider agents
+- **THEN** `config-fresh.json` SHALL exist with all sections populated including mixed-provider agents and `post_processing`
 
 #### Scenario: Incremental config sample exists
 - **WHEN** a user wants to run an incremental change on an existing project

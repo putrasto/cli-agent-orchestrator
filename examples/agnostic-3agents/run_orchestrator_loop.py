@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -28,7 +29,7 @@ import httpx
 VALID_PROVIDERS = frozenset({"codex", "claude_code", "q_cli", "kiro_cli"})
 VALID_TOP_LEVEL_KEYS = frozenset({
     "api", "provider", "wd", "prompt", "prompt_file", "project_test_cmd",
-    "agents", "limits", "condensation", "handoff",
+    "agents", "limits", "condensation", "handoff", "post_processing",
     "cleanup_on_exit", "resume", "state_file", "start_agent",
 })
 VALID_AGENT_ROLES = frozenset({
@@ -70,6 +71,8 @@ _CONFIG_KEYS: list[tuple[str, str, object, type]] = [
     ("handoff.idle_grace_seconds",                 "IDLE_GRACE_SECONDS",                 30,                     int),
     ("handoff.response_timeout",                   "RESPONSE_TIMEOUT",                   1800,                   int),
     ("start_agent",                                "START_AGENT",                        "analyst",              str),
+    ("post_processing.openspec_archive",           "POST_OPENSPEC_ARCHIVE",              False,                  bool),
+    ("post_processing.git_commit",                 "POST_GIT_COMMIT",                    False,                  bool),
 ]
 
 
@@ -212,6 +215,7 @@ def _apply_config(cfg: dict) -> None:
     global STATE_FILE, CLEANUP_ON_EXIT
     global RESPONSE_TIMEOUT, IDLE_GRACE_SECONDS, STRICT_FILE_HANDOFF
     global RESPONSE_DIR, AGENT_CONFIG, START_AGENT
+    global POST_OPENSPEC_ARCHIVE, POST_GIT_COMMIT
 
     API = cfg["API"]
     PROVIDER = cfg["PROVIDER"]
@@ -241,6 +245,8 @@ def _apply_config(cfg: dict) -> None:
     RESPONSE_DIR = Path(WD) / ".tmp" / "agent-responses"
     AGENT_CONFIG = cfg["_agent_config"]
     START_AGENT = cfg["START_AGENT"]
+    POST_OPENSPEC_ARCHIVE = cfg["POST_OPENSPEC_ARCHIVE"]
+    POST_GIT_COMMIT = cfg["POST_GIT_COMMIT"]
 
 
 # Initialize globals from env vars only (no JSON file at import time).
@@ -1059,7 +1065,153 @@ def verify_resume_terminals() -> None:
                 )
 
 
-# ── 12. Main loop + cleanup + entry point ──────────────────────────────────
+# ── 12. Post-processing (opt-in, after FINAL: PASS) ─────────────────────────
+
+
+def detect_active_change(wd: str) -> str | None:
+    """Detect a single active OpenSpec change under wd/openspec/changes/.
+
+    Returns the change name if exactly one exists, else None with a log warning.
+    """
+    changes_dir = Path(wd) / "openspec" / "changes"
+    if not changes_dir.is_dir():
+        log("Post-processing: openspec/changes/ not found, skipping archive")
+        return None
+
+    active = [
+        d.name for d in changes_dir.iterdir()
+        if d.is_dir() and d.name != "archive"
+    ]
+
+    if len(active) == 1:
+        return active[0]
+    elif len(active) == 0:
+        log("Post-processing: No active OpenSpec change found, skipping archive")
+        return None
+    else:
+        names = ", ".join(sorted(active))
+        log(f"Post-processing: Multiple active OpenSpec changes found ({names}), skipping archive")
+        return None
+
+
+def post_openspec_archive(wd: str) -> str:
+    """Run openspec archive for the active change.
+
+    Returns "success", "skipped", or "failed".
+    """
+    if not POST_OPENSPEC_ARCHIVE:
+        return "skipped"
+
+    change_name = detect_active_change(wd)
+    if change_name is None:
+        return "skipped"
+
+    log(f"Post-processing: archiving OpenSpec change '{change_name}'")
+    try:
+        result = subprocess.run(
+            ["openspec", "archive", change_name, "--yes"],
+            cwd=wd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode == 0:
+            log(f"Post-processing: OpenSpec archive succeeded")
+            return "success"
+        else:
+            stderr = result.stderr.strip() or result.stdout.strip()
+            log(f"Post-processing: OpenSpec archive failed (exit {result.returncode}): {stderr}")
+            return "failed"
+    except FileNotFoundError:
+        log("Post-processing: 'openspec' command not found")
+        return "failed"
+    except subprocess.TimeoutExpired:
+        log("Post-processing: OpenSpec archive timed out after 120s")
+        return "failed"
+    except Exception as e:
+        log(f"Post-processing: OpenSpec archive error: {e}")
+        return "failed"
+
+
+def post_git_commit(wd: str) -> bool:
+    """Stage all changes and commit in wd. Returns True on success."""
+    if not POST_GIT_COMMIT:
+        return True
+
+    try:
+        # Check if wd is a git repo
+        check = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=wd, capture_output=True, text=True,
+        )
+        if check.returncode != 0:
+            log("Post-processing: Not a git repo, skipping commit")
+            return True
+
+        # Stage all changes
+        add_result = subprocess.run(
+            ["git", "add", "-A"], cwd=wd, capture_output=True, text=True,
+        )
+        if add_result.returncode != 0:
+            stderr = add_result.stderr.strip() or add_result.stdout.strip()
+            log(f"Post-processing: git add failed: {stderr}")
+            return False
+
+        # Check for staged changes (exit 0 = no changes, 1 = has changes, >1 = error)
+        diff_check = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=wd, capture_output=True, text=True,
+        )
+        if diff_check.returncode == 0:
+            log("Post-processing: No changes to commit")
+            return True
+        if diff_check.returncode > 1:
+            stderr = diff_check.stderr.strip() or diff_check.stdout.strip()
+            log(f"Post-processing: git diff --cached failed: {stderr}")
+            return False
+
+        # Commit
+        result = subprocess.run(
+            ["git", "commit", "-m", "Orchestrator PASS: auto-commit changes"],
+            cwd=wd, capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            # Extract short commit hash from output
+            commit_out = result.stdout.strip()
+            log(f"Post-processing: git commit succeeded: {commit_out}")
+            return True
+        else:
+            stderr = result.stderr.strip() or result.stdout.strip()
+            log(f"Post-processing: git commit failed: {stderr}")
+            return False
+    except Exception as e:
+        log(f"Post-processing: git error: {e}")
+        return False
+
+
+def run_post_processing(wd: str) -> None:
+    """Run post-processing steps after FINAL: PASS.
+
+    Order: OpenSpec archive → git commit.
+    Git commit is skipped if archive failed (not skipped).
+    """
+    if not POST_OPENSPEC_ARCHIVE and not POST_GIT_COMMIT:
+        return
+
+    log("Post-processing: starting")
+
+    archive_result = post_openspec_archive(wd)
+
+    if POST_GIT_COMMIT:
+        if archive_result == "failed":
+            log("Post-processing: Skipping git commit because OpenSpec archive failed")
+        else:
+            post_git_commit(wd)
+
+    log("Post-processing: done")
+
+
+# ── 13. Main loop + cleanup + entry point ──────────────────────────────────
 
 
 def cleanup(_save: bool = True) -> None:
@@ -1304,6 +1456,7 @@ def main() -> None:
                 save_state()
                 print()
                 log("FINAL: PASS")
+                run_post_processing(WD)
                 cleanup(_save=False)
                 sys.exit(0)
 

@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Configuration via environment variables
-The orchestrator SHALL read configuration from a JSON config file (if provided as `sys.argv[1]`), environment variables, and hardcoded defaults, in that precedence order (env vars highest). Existing environment variable names/defaults SHALL remain unchanged, and one new variable SHALL be added: `START_AGENT` (default `analyst`). The `agents` section (per-agent provider/profile) SHALL be JSON-only with no env var mapping.
+The orchestrator SHALL read configuration from a JSON config file (if provided as `sys.argv[1]`), environment variables, and hardcoded defaults, in that precedence order (env vars highest). Existing environment variable names/defaults SHALL remain unchanged, and two new variables SHALL be added: `POST_OPENSPEC_ARCHIVE` (default false) and `POST_GIT_COMMIT` (default false). The `agents` section (per-agent provider/profile) SHALL be JSON-only with no env var mapping.
 
 #### Scenario: Default configuration matches shell script
 - **WHEN** no config file is provided and no environment variables are set
@@ -14,6 +14,14 @@ The orchestrator SHALL read configuration from a JSON config file (if provided a
 #### Scenario: Default start agent is analyst
 - **WHEN** no config file is provided and `START_AGENT` is not set
 - **THEN** effective `START_AGENT` SHALL be `analyst`
+
+#### Scenario: Post-processing defaults to disabled
+- **WHEN** no config file is provided and `POST_OPENSPEC_ARCHIVE` / `POST_GIT_COMMIT` env vars are not set
+- **THEN** `POST_OPENSPEC_ARCHIVE` SHALL be false and `POST_GIT_COMMIT` SHALL be false
+
+#### Scenario: Post-processing enabled via env var
+- **WHEN** `POST_OPENSPEC_ARCHIVE` env var is set to `1`
+- **THEN** `POST_OPENSPEC_ARCHIVE` SHALL be true regardless of JSON config
 
 ### Requirement: API client with httpx
 The orchestrator SHALL use an `ApiClient` class wrapping `httpx.Client` with methods: `create_session()`, `create_terminal()`, `send_input()`, `get_status()`, `get_last_output()`, `exit_terminal()`, `close()`. `create_session()` and `create_terminal()` SHALL accept a `provider` parameter instead of using a global.
