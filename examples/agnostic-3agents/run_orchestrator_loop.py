@@ -425,10 +425,17 @@ def wait_for_response_file(
     Early exit: if the terminal has been idle/completed for IDLE_GRACE_SECONDS
     without the response file appearing, stops waiting immediately instead of
     waiting for the full timeout.
+
+    Startup guard: the idle grace timer does not begin until the agent has been
+    observed in a non-idle/completed state (PROCESSING, WAITING_USER_ANSWER, etc.)
+    at least once. This prevents false-positive idle detection when the CLI agent
+    hasn't read the dispatched prompt yet. A startup timeout (IDLE_GRACE_SECONDS)
+    serves as a fallback if the processing state is never observed.
     """
     p = response_path_for(role)
     start = time.monotonic()
     idle_since: float | None = None
+    agent_started = False  # True once agent has demonstrably started processing
 
     while True:
         status = api.get_status(terminal_id)
@@ -443,9 +450,23 @@ def wait_for_response_file(
                 return content
             # File was empty — fall through to timeout/fallback logic
 
+        # Detect agent startup: any non-idle/completed status means the agent
+        # has begun processing (covers PROCESSING, WAITING_USER_ANSWER, etc.)
+        if not agent_started and status not in ("idle", "completed"):
+            agent_started = True
+
         # Track how long the terminal has been idle without a response file
         if status in ("idle", "completed") and not p.exists():
-            if idle_since is None:
+            if not agent_started:
+                # Agent hasn't started yet — check startup timeout
+                startup_elapsed = time.monotonic() - start
+                if startup_elapsed > IDLE_GRACE_SECONDS:
+                    log(f"[{role}] Warning: agent never entered processing state after "
+                        f"{IDLE_GRACE_SECONDS}s, enabling idle grace timer")
+                    agent_started = True
+                    idle_since = time.monotonic()
+                # else: skip grace timer — agent hasn't started yet
+            elif idle_since is None:
                 idle_since = time.monotonic()
             elif time.monotonic() - idle_since > IDLE_GRACE_SECONDS:
                 if STRICT_FILE_HANDOFF:

@@ -119,7 +119,7 @@ Environment variables > JSON config file > hardcoded defaults. Empty env vars ar
 | `CONDENSE_REVIEW_FEEDBACK` | `1` | Extract only REVIEW_NOTES section from peer reviews |
 | `MAX_FEEDBACK_LINES` | `30` | Max lines in condensed feedback |
 | `STRICT_FILE_HANDOFF` | `1` | Fail if agent doesn't write response file (set `0` to fall back to terminal output) |
-| `IDLE_GRACE_SECONDS` | `30` | Seconds to wait after agent goes idle before giving up on response file |
+| `IDLE_GRACE_SECONDS` | `30` | Dual role: (1) startup guard timeout — max seconds to wait for agent to enter processing state after dispatch; (2) idle grace — seconds of continuous idle before giving up on response file |
 | `RESPONSE_TIMEOUT` | `1800` | Max seconds to wait for agent to finish (while still processing) |
 
 ### Resume control

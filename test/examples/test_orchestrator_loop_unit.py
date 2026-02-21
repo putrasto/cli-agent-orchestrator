@@ -827,30 +827,34 @@ class TestWaitForResponseFile:
             orch.wait_for_response_file("analyst", "term-001", timeout=5)
 
     @patch.object(orch.api, "get_last_output", return_value="fallback output")
-    @patch.object(orch.api, "get_status", return_value="completed")
+    @patch.object(orch.api, "get_status")
     @patch("run_orchestrator_loop.time")
     def test_fallback_on_idle_grace_expired(self, mock_time, mock_status, mock_last, tmp_path):
         """No file written but terminal completed — idle grace triggers fallback."""
         orch.RESPONSE_DIR = tmp_path
         orch.STRICT_FILE_HANDOFF = False
         orch.IDLE_GRACE_SECONDS = 10
-        # start=0 | poll1: idle_since=1, elapsed=2 (ok) | poll2: idle_check=15 (>grace) → fallback
-        mock_time.monotonic.side_effect = [0.0, 1.0, 2.0, 15.0]
+        # poll1: processing (agent_started=True) | poll2: completed, idle_since=20
+        # poll3: completed, idle_check=35 (>grace) → fallback
+        mock_status.side_effect = ["processing", "completed", "completed"]
+        mock_time.monotonic.side_effect = [0.0, 10.0, 20.0, 25.0, 35.0]
         mock_time.sleep = MagicMock()
 
         result = orch.wait_for_response_file("analyst", "term-001", timeout=1800)
         assert result == "fallback output"
         mock_last.assert_called_once_with("term-001")
 
-    @patch.object(orch.api, "get_status", return_value="completed")
+    @patch.object(orch.api, "get_status")
     @patch("run_orchestrator_loop.time")
     def test_strict_mode_raises_on_idle_grace_expired(self, mock_time, mock_status, tmp_path):
         """STRICT_FILE_HANDOFF=1: idle grace expired, raises RuntimeError."""
         orch.RESPONSE_DIR = tmp_path
         orch.STRICT_FILE_HANDOFF = True
         orch.IDLE_GRACE_SECONDS = 10
-        # start=0 | poll1: idle_since=1, elapsed=2 (ok) | poll2: idle_check=15 (>grace) → error
-        mock_time.monotonic.side_effect = [0.0, 1.0, 2.0, 15.0]
+        # poll1: processing (agent_started=True) | poll2: completed, idle_since=20
+        # poll3: completed, idle_check=35 (>grace) → error
+        mock_status.side_effect = ["processing", "completed", "completed"]
+        mock_time.monotonic.side_effect = [0.0, 10.0, 20.0, 25.0, 35.0]
         mock_time.sleep = MagicMock()
 
         with pytest.raises(RuntimeError, match="did not write response file"):
@@ -887,6 +891,214 @@ class TestWaitForResponseFile:
 
         result = orch.wait_for_response_file("analyst", "term-001", timeout=10)
         assert "Real content." in result
+
+
+# ── startup guard (agent_started) ───────────────────────────────────────────
+
+
+class TestStartupGuard:
+    """Tests for the agent_started startup guard on idle grace timer."""
+
+    def setup_method(self):
+        self._orig_dir = orch.RESPONSE_DIR
+        self._orig_strict = orch.STRICT_FILE_HANDOFF
+        self._orig_poll = orch.POLL_SECONDS
+        self._orig_grace = orch.IDLE_GRACE_SECONDS
+        self._orig_wd = orch.WD
+        self._orig_ts = orch._run_timestamp
+        self._orig_seq = orch._response_seq
+
+    def teardown_method(self):
+        orch.RESPONSE_DIR = self._orig_dir
+        orch.STRICT_FILE_HANDOFF = self._orig_strict
+        orch.POLL_SECONDS = self._orig_poll
+        orch.IDLE_GRACE_SECONDS = self._orig_grace
+        orch.WD = self._orig_wd
+        orch._run_timestamp = self._orig_ts
+        orch._response_seq = self._orig_seq
+
+    @patch.object(orch.api, "get_status")
+    def test_startup_guard_blocks_premature_grace(self, mock_status, tmp_path):
+        """Stale completed status should not trigger grace until agent starts."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.STRICT_FILE_HANDOFF = True
+        orch.IDLE_GRACE_SECONDS = 10
+        orch.POLL_SECONDS = 0
+        resp_file = tmp_path / "analyst_summary.md"
+
+        # 5x completed (stale), then processing (agent_started=True),
+        # then idle + file exists → should return content
+        call_count = [0]
+        def status_side_effect(tid):
+            call_count[0] += 1
+            if call_count[0] <= 5:
+                return "completed"  # stale
+            if call_count[0] == 6:
+                return "processing"
+            # Write file for the final idle poll
+            if not resp_file.exists():
+                resp_file.write_text("ANALYST_SUMMARY:\nDone.")
+            return "idle"
+        mock_status.side_effect = status_side_effect
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=1800)
+        assert "Done." in result
+
+    @patch("run_orchestrator_loop.log")
+    @patch.object(orch.api, "get_status", return_value="completed")
+    @patch("run_orchestrator_loop.time")
+    def test_startup_guard_timeout_fallback(self, mock_time, mock_status, mock_log, tmp_path):
+        """If agent never enters processing, startup timeout releases guard, then grace fires."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.STRICT_FILE_HANDOFF = True
+        orch.IDLE_GRACE_SECONDS = 10
+
+        # Poll 1 (agent_started=False): startup_elapsed=2 (<10) skip, elapsed=2
+        # Poll 2 (agent_started=False): startup_elapsed=12 (>10) → warning,
+        #         agent_started=True, idle_since=12, elapsed=12
+        # Poll 3 (agent_started=True, idle_since=12): grace_check=15, 15-12=3 (<10),
+        #         elapsed=15
+        # Poll 4 (agent_started=True, idle_since=12): grace_check=25, 25-12=13 (>10) → error
+        mock_time.monotonic.side_effect = [
+            0.0,   # start
+            2.0,   # poll1: startup_elapsed check
+            2.0,   # poll1: elapsed check
+            12.0,  # poll2: startup_elapsed check (>10 → release guard)
+            12.0,  # poll2: idle_since = monotonic()
+            12.0,  # poll2: elapsed check
+            15.0,  # poll3: grace check (15-12=3, ok)
+            15.0,  # poll3: elapsed check
+            25.0,  # poll4: grace check (25-12=13 > 10 → error)
+        ]
+        mock_time.sleep = MagicMock()
+
+        with pytest.raises(RuntimeError, match="did not write response file"):
+            orch.wait_for_response_file("analyst", "term-001", timeout=1800)
+
+        # Verify startup timeout warning was logged
+        warning_calls = [c for c in mock_log.call_args_list
+                         if "never entered processing state" in str(c)]
+        assert len(warning_calls) == 1
+
+    @patch.object(orch.api, "get_status")
+    def test_startup_guard_waiting_user_answer_counts_as_started(self, mock_status, tmp_path):
+        """waiting_user_answer status should count as agent started."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        resp_file = tmp_path / "analyst_summary.md"
+
+        call_count = [0]
+        def status_side_effect(tid):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "waiting_user_answer"  # agent started
+            if not resp_file.exists():
+                resp_file.write_text("ANALYST_SUMMARY:\nResult.")
+            return "idle"
+        mock_status.side_effect = status_side_effect
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=10)
+        assert "Result." in result
+
+    @patch.object(orch.api, "get_status")
+    def test_startup_guard_fast_agent_with_file(self, mock_status, tmp_path):
+        """Fast agent: processing then idle with file → immediate return."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        resp_file = tmp_path / "analyst_summary.md"
+        resp_file.write_text("ANALYST_SUMMARY:\nFast result.")
+
+        mock_status.side_effect = ["processing", "idle"]
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=10)
+        assert "Fast result." in result
+        assert mock_status.call_count == 2
+
+    @patch.object(orch.api, "get_status", return_value="completed")
+    def test_startup_guard_response_file_during_startup(self, mock_status, tmp_path):
+        """Response file appears while startup guard is active → return immediately."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        resp_file = tmp_path / "analyst_summary.md"
+        resp_file.write_text("ANALYST_SUMMARY:\nStale but file exists.")
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=10)
+        assert "Stale but file exists." in result
+        # Should return on first poll — file check precedes startup guard
+        assert mock_status.call_count == 1
+
+    @patch.object(orch.api, "get_status")
+    @patch("run_orchestrator_loop.time")
+    def test_startup_guard_flicker_sequence(self, mock_time, mock_status, tmp_path):
+        """Flicker: completed→processing→completed→processing→idle+file.
+
+        Uses time-mocked control to prove idle_since resets on each processing
+        observation. Without the reset, the grace timer would expire at poll 5
+        (t=50, 50-20=30 > 10). With the reset, idle_since restarts at poll 5
+        from the second completed, and the file appears before grace expires.
+        """
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.STRICT_FILE_HANDOFF = True
+        orch.IDLE_GRACE_SECONDS = 10
+        resp_file = tmp_path / "analyst_summary.md"
+
+        call_count = [0]
+        def status_side_effect(tid):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "completed"  # stale (agent_started=False, skip)
+            if call_count[0] == 2:
+                return "processing"  # agent_started=True, idle_since=None
+            if call_count[0] == 3:
+                return "completed"  # flicker: idle_since set to t=20
+            if call_count[0] == 4:
+                return "processing"  # resumes: idle_since=None (reset!)
+            if call_count[0] == 5:
+                return "completed"  # idle_since set to t=50 (fresh, not t=20)
+            # Poll 6: file appears + idle → return
+            if not resp_file.exists():
+                resp_file.write_text("ANALYST_SUMMARY:\nFlicker result.")
+            return "idle"
+        mock_status.side_effect = status_side_effect
+
+        # Time progression: if idle_since were NOT reset at poll 4,
+        # poll 5 would check 50-20=30 > 10 → RuntimeError.
+        # With reset, poll 5 sets idle_since=50, poll 6 sees file → return.
+        mock_time.monotonic.side_effect = [
+            0.0,   # start
+            1.0,   # poll1: startup_elapsed (stale, skip)
+            1.0,   # poll1: elapsed check
+            # poll2: processing → agent_started=True, idle_since=None
+            10.0,  # poll2: elapsed check
+            20.0,  # poll3: completed → idle_since=20
+            20.0,  # poll3: idle_since = monotonic()
+            20.0,  # poll3: elapsed check
+            # poll4: processing → idle_since=None (reset)
+            40.0,  # poll4: elapsed check
+            50.0,  # poll5: completed → idle_since=50 (fresh!)
+            50.0,  # poll5: idle_since = monotonic()
+            50.0,  # poll5: elapsed check
+            55.0,  # poll6: grace check 55-50=5 (<10, ok), file exists → return
+        ]
+        mock_time.sleep = MagicMock()
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=1800)
+        assert "Flicker result." in result
 
 
 # ── send_and_wait ───────────────────────────────────────────────────────────
