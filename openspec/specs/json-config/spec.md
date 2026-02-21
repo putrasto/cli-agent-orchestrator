@@ -61,6 +61,7 @@ The JSON config file SHALL support these top-level keys: `api`, `provider`, `wd`
 - `condensation.condense_explore_on_repeat` → `CONDENSE_EXPLORE_ON_REPEAT`
 - `condensation.condense_review_feedback` → `CONDENSE_REVIEW_FEEDBACK`
 - `condensation.max_feedback_lines` → `MAX_FEEDBACK_LINES`
+- `condensation.max_test_evidence_lines` → `MAX_TEST_EVIDENCE_LINES`
 - `handoff.strict_file_handoff` → `STRICT_FILE_HANDOFF`
 - `handoff.idle_grace_seconds` → `IDLE_GRACE_SECONDS`
 - `handoff.response_timeout` → `RESPONSE_TIMEOUT`
@@ -72,6 +73,10 @@ The JSON config file SHALL support these top-level keys: `api`, `provider`, `wd`
 #### Scenario: Unknown top-level keys cause fatal error
 - **WHEN** JSON contains `{"descripion": "my run", "limits": {"max_rounds": 3}}`
 - **THEN** the orchestrator SHALL exit with code 1 and an error message identifying `descripion` as an unknown config key
+
+#### Scenario: Condensation section maps test evidence limit
+- **WHEN** JSON contains `{"condensation": {"max_test_evidence_lines": 80}}`
+- **THEN** `MAX_TEST_EVIDENCE_LINES` SHALL be 80
 
 ### Requirement: Per-agent provider and profile configuration
 The `agents` section SHALL map each of the 5 roles to an object with optional `provider` and `profile` fields. If `agents` is omitted, all roles SHALL use the top-level `provider` default and their default profile. If a role's `provider` is omitted, it SHALL inherit the top-level `provider`. If a role's `profile` is omitted, it SHALL use the default profile for that role.

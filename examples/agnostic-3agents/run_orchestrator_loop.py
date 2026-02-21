@@ -65,6 +65,7 @@ _CONFIG_KEYS: list[tuple[str, str, object, type]] = [
     ("condensation.condense_explore_on_repeat",    "CONDENSE_EXPLORE_ON_REPEAT",         True,                   bool),
     ("condensation.condense_review_feedback",      "CONDENSE_REVIEW_FEEDBACK",           True,                   bool),
     ("condensation.max_feedback_lines",            "MAX_FEEDBACK_LINES",                 30,                     int),
+    ("condensation.max_test_evidence_lines",       "MAX_TEST_EVIDENCE_LINES",            120,                    int),
     ("handoff.strict_file_handoff",                "STRICT_FILE_HANDOFF",                True,                   bool),
     ("handoff.idle_grace_seconds",                 "IDLE_GRACE_SECONDS",                 30,                     int),
     ("handoff.response_timeout",                   "RESPONSE_TIMEOUT",                   1800,                   int),
@@ -206,7 +207,7 @@ def _apply_config(cfg: dict) -> None:
     global MIN_REVIEW_CYCLES_BEFORE_APPROVAL, REQUIRE_REVIEW_EVIDENCE
     global REVIEW_EVIDENCE_MIN_MATCH, RESUME
     global CONDENSE_EXPLORE_ON_REPEAT, CONDENSE_REVIEW_FEEDBACK
-    global MAX_FEEDBACK_LINES, CONDENSE_UPSTREAM_ON_REPEAT
+    global MAX_FEEDBACK_LINES, MAX_TEST_EVIDENCE_LINES, CONDENSE_UPSTREAM_ON_REPEAT
     global CONDENSE_CROSS_PHASE, MAX_CROSS_PHASE_LINES
     global STATE_FILE, CLEANUP_ON_EXIT
     global RESPONSE_TIMEOUT, IDLE_GRACE_SECONDS, STRICT_FILE_HANDOFF
@@ -228,6 +229,7 @@ def _apply_config(cfg: dict) -> None:
     CONDENSE_EXPLORE_ON_REPEAT = cfg["CONDENSE_EXPLORE_ON_REPEAT"]
     CONDENSE_REVIEW_FEEDBACK = cfg["CONDENSE_REVIEW_FEEDBACK"]
     MAX_FEEDBACK_LINES = cfg["MAX_FEEDBACK_LINES"]
+    MAX_TEST_EVIDENCE_LINES = cfg["MAX_TEST_EVIDENCE_LINES"]
     CONDENSE_UPSTREAM_ON_REPEAT = cfg["CONDENSE_UPSTREAM_ON_REPEAT"]
     CONDENSE_CROSS_PHASE = cfg["CONDENSE_CROSS_PHASE"]
     MAX_CROSS_PHASE_LINES = cfg["MAX_CROSS_PHASE_LINES"]
@@ -569,9 +571,9 @@ def extract_test_evidence(test_text: str) -> str:
     combined = "\n".join(result_lines)
     if evidence_section:
         combined += "\n" + evidence_section
-    lines = combined.splitlines()[:MAX_FEEDBACK_LINES]
+    lines = combined.splitlines()[:MAX_TEST_EVIDENCE_LINES]
     if not "".join(lines).strip():
-        lines = test_text.splitlines()[:MAX_FEEDBACK_LINES]
+        lines = test_text.splitlines()[:MAX_TEST_EVIDENCE_LINES]
     return "\n".join(lines)
 
 
@@ -659,6 +661,13 @@ def build_analyst_prompt(round_num: int, analyst_cycle: int) -> str:
         f"Analyst review cycle: {analyst_cycle}",
         "Latest tester feedback:",
         feedback,
+    ]
+    if round_num > 1 and programmer_context_for_retry:
+        parts.extend([
+            "Previous round programmer changes (context only):",
+            programmer_context_for_retry,
+        ])
+    parts.extend([
         "Latest peer analyst feedback:",
         analyst_feedback,
         "",
@@ -666,7 +675,7 @@ def build_analyst_prompt(round_num: int, analyst_cycle: int) -> str:
         "system anaylist: dont do testing, dont implement code",
         "",
         "Task:",
-    ]
+    ])
     if round_num > 1:
         parts.extend([
             "1) Use the OpenSpec explore skill to investigate the test failure described in the tester feedback above.",
@@ -824,6 +833,7 @@ final_status: str = "RUNNING"
 feedback: str = "None yet."
 analyst_feedback: str = "None yet."
 programmer_feedback: str = "None yet."
+programmer_context_for_retry: str = ""
 outputs: dict[str, str] = {
     "analyst": "",
     "analyst_review": "",
@@ -854,6 +864,7 @@ def save_state() -> None:
         "feedback": feedback,
         "analyst_feedback": analyst_feedback,
         "programmer_feedback": programmer_feedback,
+        "programmer_context_for_retry": programmer_context_for_retry,
         "outputs": {
             "analyst": outputs["analyst"],
             "analyst_review": outputs["analyst_review"],
@@ -867,7 +878,7 @@ def save_state() -> None:
 
 def load_state() -> bool:
     global session_name, current_round, current_phase, final_status
-    global feedback, analyst_feedback, programmer_feedback
+    global feedback, analyst_feedback, programmer_feedback, programmer_context_for_retry
     global _loaded_state_terminals
 
     state_path = Path(STATE_FILE)
@@ -908,6 +919,7 @@ def load_state() -> bool:
     feedback = data.get("feedback", "None yet.")
     analyst_feedback = data.get("analyst_feedback", "None yet.")
     programmer_feedback = data.get("programmer_feedback", "None yet.")
+    programmer_context_for_retry = data.get("programmer_context_for_retry", "")
 
     out = data.get("outputs", {})
     outputs["analyst"] = out.get("analyst", "")
@@ -946,7 +958,8 @@ def _rename_terminal(terminal_id: str, role: str) -> None:
 
 def init_new_run() -> None:
     global session_name, current_round, current_phase, final_status
-    global feedback, analyst_feedback, programmer_feedback, _start_at_peer
+    global feedback, analyst_feedback, programmer_feedback, programmer_context_for_retry
+    global _start_at_peer
 
     created_terminal_ids: list[str] = []
     roles_in_order = [
@@ -985,6 +998,7 @@ def init_new_run() -> None:
     feedback = "None yet."
     analyst_feedback = "None yet."
     programmer_feedback = "None yet."
+    programmer_context_for_retry = ""
     for key in outputs:
         outputs[key] = ""
 
@@ -1072,7 +1086,8 @@ def _signal_handler(signum: int, _frame: object) -> None:
 def main() -> None:
     global PROMPT, EXPLORE_SUMMARY, SCENARIO_TEST
     global current_round, current_phase, final_status
-    global feedback, analyst_feedback, programmer_feedback, _start_at_peer
+    global feedback, analyst_feedback, programmer_feedback, programmer_context_for_retry
+    global _start_at_peer
 
     # Load config from JSON file (if provided) + env vars + defaults
     cfg = load_config()
@@ -1292,6 +1307,7 @@ def main() -> None:
                 sys.exit(0)
 
             feedback = extract_test_evidence(outputs["tester"])
+            programmer_context_for_retry = condense_programmer_for_tester(outputs["programmer"])
             log(f"[round {rnd}] tester: FAIL, retrying with feedback")
             log("FINAL: FAIL (retrying)")
 

@@ -28,7 +28,8 @@
     "condense_upstream_on_repeat": true,
     "condense_explore_on_repeat": true,
     "condense_review_feedback": true,
-    "max_feedback_lines": 30
+    "max_feedback_lines": 30,
+    "max_test_evidence_lines": 120
   },
 
   "handoff": {

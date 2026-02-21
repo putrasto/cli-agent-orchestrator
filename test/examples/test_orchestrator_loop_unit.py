@@ -1867,3 +1867,236 @@ class TestStartAgentSelection:
             assert "tester" in call_roles
         finally:
             self._restore_globals(saved)
+
+
+# ── improve-fail-handoff: extract_test_evidence with MAX_TEST_EVIDENCE_LINES ──
+
+
+class TestExtractTestEvidenceLimit:
+    """Tests for split line limits: MAX_TEST_EVIDENCE_LINES vs MAX_FEEDBACK_LINES."""
+
+    def test_truncates_at_max_test_evidence_lines(self):
+        """6.1: extract_test_evidence truncates at MAX_TEST_EVIDENCE_LINES, not MAX_FEEDBACK_LINES."""
+        original_tel = orch.MAX_TEST_EVIDENCE_LINES
+        original_mfl = orch.MAX_FEEDBACK_LINES
+        try:
+            orch.MAX_TEST_EVIDENCE_LINES = 120
+            orch.MAX_FEEDBACK_LINES = 30
+            lines = ["RESULT: FAIL", "EVIDENCE:"] + [f"line {i}" for i in range(200)]
+            text = "\n".join(lines)
+            result = orch.extract_test_evidence(text)
+            result_lines = result.splitlines()
+            assert len(result_lines) == 120
+            assert len(result_lines) > 30  # Must exceed MAX_FEEDBACK_LINES
+        finally:
+            orch.MAX_TEST_EVIDENCE_LINES = original_tel
+            orch.MAX_FEEDBACK_LINES = original_mfl
+
+    def test_fallback_uses_max_test_evidence_lines(self):
+        """6.2: Fallback path (no markers) uses MAX_TEST_EVIDENCE_LINES."""
+        original_tel = orch.MAX_TEST_EVIDENCE_LINES
+        original_mfl = orch.MAX_FEEDBACK_LINES
+        try:
+            orch.MAX_TEST_EVIDENCE_LINES = 120
+            orch.MAX_FEEDBACK_LINES = 30
+            lines = [f"plain line {i}" for i in range(200)]
+            text = "\n".join(lines)
+            result = orch.extract_test_evidence(text)
+            result_lines = result.splitlines()
+            assert len(result_lines) == 120
+        finally:
+            orch.MAX_TEST_EVIDENCE_LINES = original_tel
+            orch.MAX_FEEDBACK_LINES = original_mfl
+
+    def test_review_notes_still_uses_max_feedback_lines(self):
+        """6.3: extract_review_notes still truncates at MAX_FEEDBACK_LINES (unchanged)."""
+        original_mfl = orch.MAX_FEEDBACK_LINES
+        try:
+            orch.MAX_FEEDBACK_LINES = 30
+            lines = ["REVIEW_NOTES:"] + [f"line {i}" for i in range(100)]
+            review = "\n".join(lines)
+            result = orch.extract_review_notes(review)
+            assert len(result.splitlines()) <= 30
+        finally:
+            orch.MAX_FEEDBACK_LINES = original_mfl
+
+    def test_custom_non_default_limit(self):
+        """6.16: extract_test_evidence truncates at a custom value (e.g. 60)."""
+        original_tel = orch.MAX_TEST_EVIDENCE_LINES
+        try:
+            orch.MAX_TEST_EVIDENCE_LINES = 60
+            lines = ["RESULT: FAIL", "EVIDENCE:"] + [f"line {i}" for i in range(200)]
+            text = "\n".join(lines)
+            result = orch.extract_test_evidence(text)
+            assert len(result.splitlines()) == 60
+        finally:
+            orch.MAX_TEST_EVIDENCE_LINES = original_tel
+
+
+# ── improve-fail-handoff: programmer_context_for_retry state persistence ──
+
+
+class TestProgrammerContextForRetryState:
+    """Tests for save_state/load_state round-trip of programmer_context_for_retry."""
+
+    def test_roundtrip_preserves_retry_context(self, tmp_path):
+        """6.4: save_state/load_state round-trip preserves programmer_context_for_retry."""
+        state_file = str(tmp_path / "state.json")
+        original_state_file = orch.STATE_FILE
+        try:
+            orch.STATE_FILE = state_file
+            orch.session_name = "cao-retry-test"
+            orch.terminal_ids.update({
+                "analyst": "a1", "peer_analyst": "a2",
+                "programmer": "p1", "peer_programmer": "p2", "tester": "t1",
+            })
+            orch.current_round = 2
+            orch.current_phase = orch.PHASE_ANALYST
+            orch.final_status = "RUNNING"
+            orch.feedback = "RESULT: FAIL"
+            orch.analyst_feedback = "None yet."
+            orch.programmer_feedback = "None yet."
+            orch.programmer_context_for_retry = "- Files changed: foo.py\n- Behavior implemented: bar"
+            orch.outputs.update({
+                "analyst": "", "analyst_review": "",
+                "programmer": "", "programmer_review": "", "tester": "",
+            })
+
+            orch.save_state()
+
+            # Reset and reload
+            orch.programmer_context_for_retry = ""
+            assert orch.load_state() is True
+            assert orch.programmer_context_for_retry == "- Files changed: foo.py\n- Behavior implemented: bar"
+        finally:
+            orch.STATE_FILE = original_state_file
+
+    def test_load_old_state_defaults_to_empty(self, tmp_path):
+        """6.5: load_state on old state file without programmer_context_for_retry defaults to ''."""
+        state_file = tmp_path / "state.json"
+        state_file.write_text(json.dumps({
+            "current_round": 2,
+            "current_phase": "analyst",
+            "terminals": {},
+            "outputs": {},
+            "feedback": "RESULT: FAIL",
+            "analyst_feedback": "None yet.",
+            "programmer_feedback": "None yet.",
+        }))
+        original_state_file = orch.STATE_FILE
+        try:
+            orch.STATE_FILE = str(state_file)
+            orch.programmer_context_for_retry = "should be overwritten"
+            orch.load_state()
+            assert orch.programmer_context_for_retry == ""
+        finally:
+            orch.STATE_FILE = original_state_file
+
+
+# ── improve-fail-handoff: analyst prompt includes/excludes retry context ──
+
+
+class TestAnalystPromptRetryContext:
+    """Tests for programmer_context_for_retry injection in build_analyst_prompt."""
+
+    def setup_method(self):
+        orch._explore_sent.clear()
+        orch.EXPLORE_SUMMARY = "Explore summary text."
+        orch.SCENARIO_TEST = "Run the test scenario."
+        orch.terminal_ids.update({
+            "analyst": "a001", "peer_analyst": "a002",
+            "programmer": "p001", "peer_programmer": "p002", "tester": "t001",
+        })
+        orch.feedback = "RESULT: FAIL\nEVIDENCE:\n- something broke"
+        orch.analyst_feedback = "None yet."
+        orch.programmer_feedback = "None yet."
+
+    def test_round2_includes_context_when_nonempty(self):
+        """6.6: build_analyst_prompt includes programmer context when round > 1 and non-empty."""
+        orch.programmer_context_for_retry = "- Files changed: foo.py"
+        prompt = orch.build_analyst_prompt(2, 1)
+        assert "Previous round programmer changes (context only):" in prompt
+        assert "- Files changed: foo.py" in prompt
+
+    def test_round1_excludes_context(self):
+        """6.7: build_analyst_prompt excludes programmer context when round == 1."""
+        orch.programmer_context_for_retry = "- Files changed: foo.py"
+        prompt = orch.build_analyst_prompt(1, 1)
+        assert "Previous round programmer changes" not in prompt
+
+    def test_round2_excludes_context_when_empty(self):
+        """6.8: build_analyst_prompt excludes block when context is empty string."""
+        orch.programmer_context_for_retry = ""
+        prompt = orch.build_analyst_prompt(2, 1)
+        assert "Previous round programmer changes" not in prompt
+
+
+# ── improve-fail-handoff: other prompts never include retry context ──
+
+
+class TestOtherPromptsExcludeRetryContext:
+    """Tests that non-analyst prompt builders never include programmer retry context."""
+
+    def setup_method(self):
+        orch._explore_sent.clear()
+        orch.EXPLORE_SUMMARY = "Explore summary text."
+        orch.SCENARIO_TEST = "Run the test scenario."
+        orch.terminal_ids.update({
+            "analyst": "a001", "peer_analyst": "a002",
+            "programmer": "p001", "peer_programmer": "p002", "tester": "t001",
+        })
+        orch.feedback = "None yet."
+        orch.analyst_feedback = "None yet."
+        orch.programmer_feedback = "None yet."
+        orch.programmer_context_for_retry = "- Files changed: should_not_appear.py"
+
+    def test_programmer_prompt_excludes(self):
+        """6.10: build_programmer_prompt does not contain retry context."""
+        prompt = orch.build_programmer_prompt(2, 1, "analyst output")
+        assert "Previous round programmer changes" not in prompt
+
+    def test_programmer_review_prompt_excludes(self):
+        """6.11: build_programmer_review_prompt does not contain retry context."""
+        prompt = orch.build_programmer_review_prompt("programmer output")
+        assert "Previous round programmer changes" not in prompt
+
+    def test_analyst_review_prompt_excludes(self):
+        """6.12: build_analyst_review_prompt does not contain retry context."""
+        prompt = orch.build_analyst_review_prompt("analyst output")
+        assert "Previous round programmer changes" not in prompt
+
+    def test_tester_prompt_excludes(self):
+        """6.13: build_tester_prompt does not contain retry context."""
+        prompt = orch.build_tester_prompt("programmer output")
+        assert "Previous round programmer changes" not in prompt
+
+
+# ── improve-fail-handoff: MAX_TEST_EVIDENCE_LINES config pipeline ──
+
+
+class TestMaxTestEvidenceLinesConfig:
+    """Tests for MAX_TEST_EVIDENCE_LINES in the config pipeline."""
+
+    def test_json_config_loads_test_evidence_lines(self, tmp_path):
+        """6.9: MAX_TEST_EVIDENCE_LINES loads from JSON condensation section."""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({
+            "condensation": {"max_test_evidence_lines": 80}
+        }))
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["MAX_TEST_EVIDENCE_LINES"] == 80
+
+    def test_default_value_is_120(self):
+        """6.14: MAX_TEST_EVIDENCE_LINES defaults to 120 when not configured."""
+        cfg = orch.load_config(argv=["prog"])
+        assert cfg["MAX_TEST_EVIDENCE_LINES"] == 120
+
+    def test_env_var_overrides_json(self, tmp_path, monkeypatch):
+        """6.15: env var MAX_TEST_EVIDENCE_LINES overrides JSON value."""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({
+            "condensation": {"max_test_evidence_lines": 80}
+        }))
+        monkeypatch.setenv("MAX_TEST_EVIDENCE_LINES", "60")
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["MAX_TEST_EVIDENCE_LINES"] == 60
