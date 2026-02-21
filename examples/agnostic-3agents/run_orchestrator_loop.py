@@ -563,25 +563,29 @@ def build_programmer_review_prompt(programmer_out: str) -> str:
 
 def build_tester_prompt(programmer_out: str) -> str:
     parts = [
+        response_file_instruction("tester"),
+        "",
+        "Guard lines:",
+        "tester: Do NOT implement code, Do NOT fix bugs, Do NOT modify any files.",
+        "tester: Do NOT run git commands. Do NOT take action after reporting.",
+        "tester: Your ONLY job is: run tests, observe, report PASS/FAIL, write response file, STOP.",
+        "",
         f"{SCENARIO_HEADER}",
         SCENARIO_TEST,
         "",
         "Programmer changes:",
         condense_programmer_for_tester(programmer_out),
         "",
-        "Guard lines:",
-        "tester: dont implement code, dont modify openspec artifact",
-        "",
         "Task:",
         "1) Run tests based on SCENARIO TEST only.",
-        "2) Return strict machine-readable result:",
+        "2) Write your result to the response file above. Use this exact format:",
         "RESULT: PASS or RESULT: FAIL",
         "EVIDENCE:",
         "- Commands run:",
         "- Key outputs:",
         "- Failed criteria (if any):",
         "- Recommended next fix:",
-        response_file_instruction("tester"),
+        "3) STOP. Do not take any further action after writing the response file.",
     ]
     return "\n".join(parts)
 
