@@ -320,6 +320,84 @@ class TestCodexProviderStatusDetection:
         assert status == TerminalStatus.PROCESSING
 
 
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_idle_despite_narrative_processing_keyword(self, mock_tmux):
+        # "running" in narrative text should NOT block idle detection.
+        mock_tmux.get_history.return_value = (
+            "› Reply with READY\n"
+            "• I have all results and will now write the required PASS/FAIL report to the\n"
+            "  mandated response file in the exact format, then stop running commands.\n"
+            "\n"
+            "• RESULT: PASS\n"
+            "\n"
+            "  Report written to test_result.md.\n"
+            "\n"
+            "› Explain this codebase\n"
+            "? for shortcuts\n"
+            "87% context left\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status in (TerminalStatus.IDLE, TerminalStatus.COMPLETED)
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_processing_with_active_work_ui_overrides_idle(self, mock_tmux):
+        # "esc to interrupt" UI should still block idle detection.
+        mock_tmux.get_history.return_value = (
+            "› Reply with READY\n"
+            "• READY\n"
+            "› Fix the bug\n"
+            "• Analyzing codebase\n"
+            "Working (5s • esc to interrupt)\n"
+            "? for shortcuts\n"
+            "92% context left\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.PROCESSING
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_idle_despite_narrative_exploring(self, mock_tmux):
+        # "exploring" in narrative text (without bullet prefix) should NOT block idle.
+        mock_tmux.get_history.return_value = (
+            "› Reply with READY\n"
+            "• I was exploring the codebase and found the issue.\n"
+            "  The fix is applied.\n"
+            "›\n"
+            "? for shortcuts\n"
+            "95% context left\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status in (TerminalStatus.IDLE, TerminalStatus.COMPLETED)
+
+    def test_user_prefix_pattern_no_cross_line_match(self):
+        # Standalone › followed by newline should NOT match USER_PREFIX_PATTERN.
+        import re
+        from cli_agent_orchestrator.providers.codex import USER_PREFIX_PATTERN
+
+        # Should NOT match: standalone › with next line starting with digit
+        text = "›\n100% context left"
+        matches = list(re.finditer(USER_PREFIX_PATTERN, text, re.IGNORECASE | re.MULTILINE))
+        assert len(matches) == 0, f"Unexpected match for standalone ›: {matches}"
+
+        # Should match: › followed by text on the same line
+        text2 = "› Reply with READY"
+        matches2 = list(re.finditer(USER_PREFIX_PATTERN, text2, re.IGNORECASE | re.MULTILINE))
+        assert len(matches2) == 1
+
+        # Should match: › followed by tab and text on the same line
+        text3 = "›\tReply with READY"
+        matches3 = list(re.finditer(USER_PREFIX_PATTERN, text3, re.IGNORECASE | re.MULTILINE))
+        assert len(matches3) == 1
+
+
 class TestCodexProviderMessageExtraction:
     def test_extract_last_message_success(self):
         output = load_fixture("codex_completed_output.txt")

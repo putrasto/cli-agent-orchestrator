@@ -1,34 +1,4 @@
-## ADDED Requirements
-
-### Requirement: Response file path mapping
-The system SHALL map each agent role to a unique response file path under `.tmp/agent-responses/`:
-- `analyst` → `analyst_summary.md`
-- `analyst_review` → `analyst_review.md`
-- `programmer` → `programmer_summary.md`
-- `programmer_review` → `programmer_review.md`
-- `tester` → `test_result.md`
-
-#### Scenario: Each role resolves to the correct file
-- **WHEN** `response_path_for(role)` is called for each of the 5 roles
-- **THEN** the returned path SHALL be `RESPONSE_DIR / <filename>` matching the mapping above
-
-### Requirement: Stale response file cleanup
-The system SHALL delete any existing response file for a role before sending a new prompt to that agent.
-
-#### Scenario: Stale file from previous run exists
-- **WHEN** `clear_stale_response("analyst")` is called and `analyst_summary.md` exists
-- **THEN** the file SHALL be deleted
-
-#### Scenario: No stale file exists
-- **WHEN** `clear_stale_response("analyst")` is called and no file exists
-- **THEN** no error SHALL be raised
-
-### Requirement: Response directory creation
-The system SHALL create the `.tmp/agent-responses/` directory (including parents) if it does not exist.
-
-#### Scenario: Directory does not exist
-- **WHEN** `ensure_response_dir()` is called and the directory is missing
-- **THEN** the directory SHALL be created with all parent directories
+## MODIFIED Requirements
 
 ### Requirement: Poll for response file with terminal status gate
 The system SHALL poll for the response file with the following logic:
@@ -90,21 +60,3 @@ The Codex provider's `USER_PREFIX_PATTERN` SHALL only match horizontal whitespac
 #### Scenario: Standalone chevron with prior assistant produces completed
 - **WHEN** terminal output contains a user prompt, then assistant response, then standalone `›\n` followed by context footer
 - **THEN** the provider SHALL report status as `completed` (not `idle`)
-
-### Requirement: Response file instruction injection
-Each agent prompt SHALL have a `RESPONSE FILE INSTRUCTION` block appended that tells the agent to write its complete final response to the role's response file path using a heredoc shell command.
-
-#### Scenario: Analyst prompt includes file instruction
-- **WHEN** the analyst prompt is built
-- **THEN** it SHALL contain the absolute path to `analyst_summary.md` inside a `RESPONSE FILE INSTRUCTION` block
-
-#### Scenario: All five agent roles have file instructions
-- **WHEN** prompts are built for all 5 roles
-- **THEN** each SHALL contain the correct response file path for that role
-
-### Requirement: Send-and-wait convenience function
-`send_and_wait(terminal_id, role, message)` SHALL clear the stale response file, send the message via the API, and wait for the response file, returning the response content.
-
-#### Scenario: Normal send-and-wait flow
-- **WHEN** `send_and_wait()` is called
-- **THEN** it SHALL call `clear_stale_response()`, then `api.send_input()`, then `wait_for_response_file()`, and return the result

@@ -28,11 +28,11 @@ IDLE_PROMPT_PATTERN_LOG = r"❯"
 # - legacy: "assistant:", "You ..."
 # - v0.104+: "• ..." (assistant), "› ..." (user)
 ASSISTANT_PREFIX_PATTERN = r"^\s*(?:(?:assistant|codex|agent)\s*:|•\s+)"
-USER_PREFIX_PATTERN = r"^\s*(?:You\b|›\s+\S)"
+USER_PREFIX_PATTERN = r"^\s*(?:You\b|›[ \t]+\S)"
 CONTEXT_FOOTER_PATTERN = r"^\s*.*\d+%\s+context left\s*$"
 
 PROCESSING_PATTERN = r"\b(thinking|working|running|executing|processing|analyzing)\b"
-ACTIVE_WORK_UI_PATTERN = r"(?:\(\d+s\s+•\s+esc to interrupt\)|\besc to interrupt\b|\bExploring\b)"
+ACTIVE_WORK_UI_PATTERN = r"(?:\(\d+s\s+•\s+esc to interrupt\)|\besc to interrupt\b|•\s+Exploring\b)"
 WAITING_PROMPT_PATTERN = r"^(?:Approve|Allow)\b.*\b(?:y/n|yes/no|yes|no)\b"
 ERROR_PATTERN = r"^(?:Error:|ERROR:|Traceback \(most recent call last\):|panic:)"
 
@@ -131,7 +131,7 @@ class CodexProvider(BaseProvider):
         has_v104_idle_prompt = (
             has_context_footer
             and (has_standalone_chevron_prompt or has_prompt_hint_line or has_v104_user_prompt_line)
-            and not has_processing_signal
+            and not has_active_work_ui
         )
 
         waiting_after_last_user = bool(
@@ -169,7 +169,7 @@ class CodexProvider(BaseProvider):
         elif error_after_last_user or error_no_user:
             status = TerminalStatus.ERROR
             reason = "error_pattern_detected"
-        elif (has_idle_prompt_at_end or has_v104_idle_prompt) and not has_processing_signal:
+        elif (has_idle_prompt_at_end or has_v104_idle_prompt) and not has_active_work_ui:
             if last_user is not None and assistant_after_last_user:
                 status = TerminalStatus.COMPLETED
                 reason = "idle_with_assistant_after_last_user"
