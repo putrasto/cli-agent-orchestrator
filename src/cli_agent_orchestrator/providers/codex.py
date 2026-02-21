@@ -22,16 +22,17 @@ IDLE_PROMPT_AT_END_PATTERN = (
     rf"(?:^|\n)\s*(?:{IDLE_PROMPT_PATTERN}\s*|›\s+.*for shortcuts.*)\s*\Z"
 )
 IDLE_PROMPT_LINE_PATTERN = rf"^\s*{IDLE_PROMPT_PATTERN}\s*$"
-PROMPT_HINT_LINE_PATTERN = r"^\s*›\s+.*for shortcuts.*$"
+PROMPT_HINT_LINE_PATTERN = r"^\s*(?:›|\?)\s*.*for shortcuts.*$"
 IDLE_PROMPT_PATTERN_LOG = r"❯"
 # Codex markers vary by version:
 # - legacy: "assistant:", "You ..."
 # - v0.104+: "• ..." (assistant), "› ..." (user)
 ASSISTANT_PREFIX_PATTERN = r"^\s*(?:(?:assistant|codex|agent)\s*:|•\s+)"
 USER_PREFIX_PATTERN = r"^\s*(?:You\b|›\s+\S)"
-CONTEXT_FOOTER_PATTERN = r"^\s*\d+%\s+context left\s*$"
+CONTEXT_FOOTER_PATTERN = r"^\s*.*\d+%\s+context left\s*$"
 
 PROCESSING_PATTERN = r"\b(thinking|working|running|executing|processing|analyzing)\b"
+ACTIVE_WORK_UI_PATTERN = r"(?:\(\d+s\s+•\s+esc to interrupt\)|\besc to interrupt\b|\bExploring\b)"
 WAITING_PROMPT_PATTERN = r"^(?:Approve|Allow)\b.*\b(?:y/n|yes/no|yes|no)\b"
 ERROR_PATTERN = r"^(?:Error:|ERROR:|Traceback \(most recent call last\):|panic:)"
 
@@ -90,7 +91,6 @@ class CodexProvider(BaseProvider):
     def _analyze_clean_output(self, clean_output: str) -> dict[str, Any]:
         """Analyze normalized output and return status with matching signals."""
         tail_output = "\n".join(clean_output.splitlines()[-25:])
-        tail_output_lower = tail_output.lower()
 
         last_user = None
         for match in re.finditer(USER_PREFIX_PATTERN, clean_output, re.IGNORECASE | re.MULTILINE):
@@ -109,10 +109,29 @@ class CodexProvider(BaseProvider):
         has_idle_prompt_at_end = bool(
             re.search(IDLE_PROMPT_AT_END_PATTERN, clean_output, re.IGNORECASE | re.MULTILINE)
         )
+        has_context_footer = bool(
+            re.search(CONTEXT_FOOTER_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE)
+        )
+        has_prompt_hint_line = bool(
+            re.search(PROMPT_HINT_LINE_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE)
+        )
+        has_standalone_chevron_prompt = bool(
+            re.search(r"^\s*›\s*$", tail_output, re.IGNORECASE | re.MULTILINE)
+        )
+        has_v104_user_prompt_line = bool(
+            re.search(r"^\s*›\s*\S.*$", tail_output, re.IGNORECASE | re.MULTILINE)
+        )
+        has_active_work_ui = bool(
+            re.search(ACTIVE_WORK_UI_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE)
+        )
+        has_processing_keyword = bool(
+            re.search(PROCESSING_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE)
+        )
+        has_processing_signal = has_active_work_ui or has_processing_keyword
         has_v104_idle_prompt = (
-            "context left" in tail_output_lower
-            or bool(re.search(r"^\s*›\s*$", tail_output, re.IGNORECASE | re.MULTILINE))
-            or bool(re.search(PROMPT_HINT_LINE_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE))
+            has_context_footer
+            and (has_standalone_chevron_prompt or has_prompt_hint_line or has_v104_user_prompt_line)
+            and not has_processing_signal
         )
 
         waiting_after_last_user = bool(
@@ -150,7 +169,7 @@ class CodexProvider(BaseProvider):
         elif error_after_last_user or error_no_user:
             status = TerminalStatus.ERROR
             reason = "error_pattern_detected"
-        elif has_idle_prompt_at_end or has_v104_idle_prompt:
+        elif (has_idle_prompt_at_end or has_v104_idle_prompt) and not has_processing_signal:
             if last_user is not None and assistant_after_last_user:
                 status = TerminalStatus.COMPLETED
                 reason = "idle_with_assistant_after_last_user"
@@ -163,6 +182,7 @@ class CodexProvider(BaseProvider):
             "reason": reason,
             "has_idle_prompt_at_end": has_idle_prompt_at_end,
             "has_v104_idle_prompt": has_v104_idle_prompt,
+            "has_processing_signal": has_processing_signal,
             "has_last_user": last_user is not None,
             "assistant_after_last_user": assistant_after_last_user,
             "waiting_after_last_user": waiting_after_last_user,
@@ -181,6 +201,7 @@ class CodexProvider(BaseProvider):
                 "reason": "empty_output",
                 "has_idle_prompt_at_end": False,
                 "has_v104_idle_prompt": False,
+                "has_processing_signal": False,
                 "has_last_user": False,
                 "assistant_after_last_user": False,
                 "waiting_after_last_user": False,
@@ -215,7 +236,7 @@ class CodexProvider(BaseProvider):
             snapshot = self.get_status_debug_snapshot(tail_lines=200)
             logger.info(
                 "Codex init debug poll=%s elapsed=%.1fs status=%s reason=%s "
-                "idle_end=%s idle_v104=%s last_user=%s assistant_after_user=%s "
+                "idle_end=%s idle_v104=%s processing_signal=%s last_user=%s assistant_after_user=%s "
                 "waiting_after_user=%s error_after_user=%s waiting_no_user=%s error_no_user=%s "
                 'tail="%s"',
                 poll_count,
@@ -224,6 +245,7 @@ class CodexProvider(BaseProvider):
                 snapshot["reason"],
                 snapshot["has_idle_prompt_at_end"],
                 snapshot["has_v104_idle_prompt"],
+                snapshot["has_processing_signal"],
                 snapshot["has_last_user"],
                 snapshot["assistant_after_last_user"],
                 snapshot["waiting_after_last_user"],

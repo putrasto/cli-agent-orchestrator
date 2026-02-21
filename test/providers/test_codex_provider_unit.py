@@ -238,6 +238,34 @@ class TestCodexProviderStatusDetection:
         assert status == TerminalStatus.IDLE
 
     @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_idle_with_inline_shortcuts_and_context_footer(self, mock_tmux):
+        mock_tmux.get_history.return_value = (
+            "╰──────────────────────────────────────────────────╯\n"
+            "Tip: Try the Codex App.\n"
+            "› Summarize recent commits\n"
+            "? for shortcuts                                            100% context left\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.IDLE
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_idle_with_merged_prompt_shortcuts_and_footer(self, mock_tmux):
+        # Some captures merge the prompt, shortcut hint, and context footer into one line.
+        mock_tmux.get_history.return_value = (
+            "• Findings\n"
+            "  REVIEW_RESULT: APPROVED\n"
+            "›Summarize recent commits? for shortcuts59% context left\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.IDLE
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
     def test_get_status_completed_with_v104_prompt_and_footer(self, mock_tmux):
         mock_tmux.get_history.return_value = (
             "You fix the bug\n"
@@ -268,6 +296,23 @@ class TestCodexProviderStatusDetection:
     @patch("cli_agent_orchestrator.providers.codex.tmux_client")
     def test_get_status_processing_with_v104_markers_without_idle_prompt(self, mock_tmux):
         mock_tmux.get_history.return_value = "› Reply with READY\n• Working on it...\n"
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.PROCESSING
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_processing_when_footer_and_prompt_hint_present_but_working(self, mock_tmux):
+        # Codex v0.104 UI can show prompt hint + context footer while still working.
+        mock_tmux.get_history.return_value = (
+            "› Reply with READY\n"
+            "• Exploring project files\n"
+            "Working (12s • esc to interrupt)\n"
+            "› Find and fix a bug in @filename\n"
+            "? for shortcuts\n"
+            "99% context left\n"
+        )
 
         provider = CodexProvider("test1234", "test-session", "window-0")
         status = provider.get_status()
