@@ -1822,12 +1822,12 @@ class TestExploreBeforeFf:
     def test_round_1_has_explore_codebase(self):
         prompt = orch.build_analyst_prompt(1, 1)
         assert "Explore the codebase" in prompt
-        assert "fast-forward skill" in prompt
+        assert "/opsx:ff" in prompt
 
     def test_round_2_has_explore_skill_investigate(self):
         prompt = orch.build_analyst_prompt(2, 1)
-        assert "explore skill to investigate the test failure" in prompt
-        assert "fast-forward skill to update" in prompt
+        assert "/opsx:explore" in prompt
+        assert "/opsx:ff" in prompt
         assert "Explore the codebase" not in prompt
 
 

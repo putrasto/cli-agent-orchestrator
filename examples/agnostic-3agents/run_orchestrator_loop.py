@@ -741,13 +741,13 @@ def build_analyst_prompt(round_num: int, analyst_cycle: int) -> str:
     ])
     if round_num > 1:
         parts.extend([
-            "1) Use the OpenSpec explore skill to investigate the test failure described in the tester feedback above.",
-            "2) Based on your findings, use the OpenSpec fast-forward skill to update the artifacts.",
+            "1) Run /opsx:explore to investigate the test failure described in the tester feedback above.",
+            "2) Based on your findings, run /opsx:ff to update the OpenSpec artifacts.",
         ])
     else:
         parts.extend([
             "1) Explore the codebase.",
-            "2) Create/update all OpenSpec artifacts using the OpenSpec fast-forward skill.",
+            "2) Run /opsx:ff to create/update all OpenSpec artifacts.",
         ])
     parts.extend([
         "3) Return ANALYST_SUMMARY exactly as profile format.",
