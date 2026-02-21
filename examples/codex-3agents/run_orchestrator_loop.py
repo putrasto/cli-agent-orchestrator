@@ -52,6 +52,7 @@ CLEANUP_ON_EXIT = os.getenv("CLEANUP_ON_EXIT", "0") == "1"
 
 RESPONSE_DIR = Path(WD) / ".tmp" / "agent-responses"
 RESPONSE_TIMEOUT = int(os.getenv("RESPONSE_TIMEOUT", "1800"))
+IDLE_GRACE_SECONDS = int(os.getenv("IDLE_GRACE_SECONDS", "30"))
 STRICT_FILE_HANDOFF = os.getenv("STRICT_FILE_HANDOFF", "1") == "1"
 
 EXPLORE_HEADER = "*** ORIGINAL EXPLORE SUMMARY ***"
@@ -183,9 +184,14 @@ def wait_for_response_file(
     When STRICT_FILE_HANDOFF is True (default), raises RuntimeError if the
     file never appears — ensuring file-only handoff with no terminal output
     parsing. When False, falls back to api.get_last_output().
+
+    Early exit: if the terminal has been idle/completed for IDLE_GRACE_SECONDS
+    without the response file appearing, stops waiting immediately instead of
+    waiting for the full timeout.
     """
     p = response_path_for(role)
     start = time.monotonic()
+    idle_since: float | None = None
 
     while True:
         status = api.get_status(terminal_id)
@@ -199,6 +205,23 @@ def wait_for_response_file(
             if content:
                 return content
             # File was empty — fall through to timeout/fallback logic
+
+        # Track how long the terminal has been idle without a response file
+        if status in ("idle", "completed") and not p.exists():
+            if idle_since is None:
+                idle_since = time.monotonic()
+            elif time.monotonic() - idle_since > IDLE_GRACE_SECONDS:
+                if STRICT_FILE_HANDOFF:
+                    raise RuntimeError(
+                        f"[{role}] Agent finished (idle {IDLE_GRACE_SECONDS}s) "
+                        f"but did not write response file "
+                        f"(STRICT_FILE_HANDOFF=1, no fallback)"
+                    )
+                log(f"[{role}] Agent finished but no response file after "
+                    f"{IDLE_GRACE_SECONDS}s idle, falling back to get_last_output()")
+                return api.get_last_output(terminal_id)
+        else:
+            idle_since = None  # Reset if terminal is processing or file appeared
 
         elapsed = time.monotonic() - start
         if elapsed > timeout:

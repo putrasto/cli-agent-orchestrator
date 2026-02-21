@@ -748,11 +748,13 @@ class TestWaitForResponseFile:
         self._orig_dir = orch.RESPONSE_DIR
         self._orig_strict = orch.STRICT_FILE_HANDOFF
         self._orig_poll = orch.POLL_SECONDS
+        self._orig_grace = orch.IDLE_GRACE_SECONDS
 
     def teardown_method(self):
         orch.RESPONSE_DIR = self._orig_dir
         orch.STRICT_FILE_HANDOFF = self._orig_strict
         orch.POLL_SECONDS = self._orig_poll
+        orch.IDLE_GRACE_SECONDS = self._orig_grace
 
     @patch.object(orch.api, "get_status")
     def test_file_exists_and_idle_returns_content(self, mock_status, tmp_path):
@@ -792,29 +794,32 @@ class TestWaitForResponseFile:
     @patch.object(orch.api, "get_last_output", return_value="fallback output")
     @patch.object(orch.api, "get_status", return_value="completed")
     @patch("run_orchestrator_loop.time")
-    def test_fallback_on_timeout_when_idle(self, mock_time, mock_status, mock_last, tmp_path):
-        """No file written but terminal completed — fallback to get_last_output."""
+    def test_fallback_on_idle_grace_expired(self, mock_time, mock_status, mock_last, tmp_path):
+        """No file written but terminal completed — idle grace triggers fallback."""
         orch.RESPONSE_DIR = tmp_path
         orch.STRICT_FILE_HANDOFF = False
-        # Simulate immediate timeout: monotonic returns 0, then > timeout
-        mock_time.monotonic.side_effect = [0.0, 9999.0]
+        orch.IDLE_GRACE_SECONDS = 10
+        # start=0 | poll1: idle_since=1, elapsed=2 (ok) | poll2: idle_check=15 (>grace) → fallback
+        mock_time.monotonic.side_effect = [0.0, 1.0, 2.0, 15.0]
         mock_time.sleep = MagicMock()
 
-        result = orch.wait_for_response_file("analyst", "term-001", timeout=1)
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=1800)
         assert result == "fallback output"
         mock_last.assert_called_once_with("term-001")
 
     @patch.object(orch.api, "get_status", return_value="completed")
     @patch("run_orchestrator_loop.time")
-    def test_strict_mode_raises_on_missing_file(self, mock_time, mock_status, tmp_path):
-        """STRICT_FILE_HANDOFF=1: no fallback, raises RuntimeError."""
+    def test_strict_mode_raises_on_idle_grace_expired(self, mock_time, mock_status, tmp_path):
+        """STRICT_FILE_HANDOFF=1: idle grace expired, raises RuntimeError."""
         orch.RESPONSE_DIR = tmp_path
         orch.STRICT_FILE_HANDOFF = True
-        mock_time.monotonic.side_effect = [0.0, 9999.0]
+        orch.IDLE_GRACE_SECONDS = 10
+        # start=0 | poll1: idle_since=1, elapsed=2 (ok) | poll2: idle_check=15 (>grace) → error
+        mock_time.monotonic.side_effect = [0.0, 1.0, 2.0, 15.0]
         mock_time.sleep = MagicMock()
 
-        with pytest.raises(RuntimeError, match="STRICT_FILE_HANDOFF"):
-            orch.wait_for_response_file("analyst", "term-001", timeout=1)
+        with pytest.raises(RuntimeError, match="did not write response file"):
+            orch.wait_for_response_file("analyst", "term-001", timeout=1800)
 
     @patch.object(orch.api, "get_status", return_value="processing")
     @patch("run_orchestrator_loop.time")
