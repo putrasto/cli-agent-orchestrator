@@ -849,13 +849,20 @@ def build_programmer_prompt(
             "",
         ])
 
+    # Include scenario test so programmer can trace expected behavior
+    parts.extend([
+        f"{SCENARIO_HEADER} (read-only reference — do NOT run the scenario test yourself)",
+        SCENARIO_TEST,
+        "",
+    ])
+
     parts.extend([
         f"Programmer review cycle: {programmer_cycle}",
         "Latest peer programmer feedback:",
         programmer_feedback,
         "",
         "Guard lines:",
-        "programmer: dont do scenario test",
+        "programmer: dont run the scenario test, but use it as read-only reference to understand expected behavior and trace issues",
         "Autonomy rules: do not run destructive commands in repo paths (rm, git clean, git reset --hard, overwrite moves)",
         "Autonomy rules: do not delete tests/fixtures/**",
         "Autonomy rules: write temporary artifacts only under .tmp/ or /tmp/",
