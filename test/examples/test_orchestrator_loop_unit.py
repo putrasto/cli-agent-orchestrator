@@ -2452,11 +2452,11 @@ class TestProgrammerContextForRetryState:
             orch.STATE_FILE = original_state_file
 
 
-# ── improve-fail-handoff: analyst prompt includes/excludes retry context ──
+# ── shortcut-retry-on-fail: analyst prompt no longer includes retry context ──
 
 
 class TestAnalystPromptRetryContext:
-    """Tests for programmer_context_for_retry injection in build_analyst_prompt."""
+    """Tests that analyst prompt never includes programmer retry context (removed by shortcut-retry)."""
 
     def setup_method(self):
         orch._explore_sent.clear()
@@ -2470,31 +2470,31 @@ class TestAnalystPromptRetryContext:
         orch.analyst_feedback = "None yet."
         orch.programmer_feedback = "None yet."
 
-    def test_round2_includes_context_when_nonempty(self):
-        """6.6: build_analyst_prompt includes programmer context when round > 1 and non-empty."""
+    def test_round2_excludes_context_even_when_nonempty(self):
+        """Analyst prompt never includes programmer retry context (analyst not invoked on retry)."""
         orch.programmer_context_for_retry = "- Files changed: foo.py"
         prompt = orch.build_analyst_prompt(2, 1)
-        assert "Previous round programmer changes (context only):" in prompt
-        assert "- Files changed: foo.py" in prompt
+        assert "Previous round programmer changes" not in prompt
+        assert "Your previous changes" not in prompt
 
     def test_round1_excludes_context(self):
-        """6.7: build_analyst_prompt excludes programmer context when round == 1."""
+        """build_analyst_prompt excludes programmer context when round == 1."""
         orch.programmer_context_for_retry = "- Files changed: foo.py"
         prompt = orch.build_analyst_prompt(1, 1)
         assert "Previous round programmer changes" not in prompt
 
     def test_round2_excludes_context_when_empty(self):
-        """6.8: build_analyst_prompt excludes block when context is empty string."""
+        """build_analyst_prompt excludes block when context is empty string."""
         orch.programmer_context_for_retry = ""
         prompt = orch.build_analyst_prompt(2, 1)
         assert "Previous round programmer changes" not in prompt
 
 
-# ── improve-fail-handoff: other prompts never include retry context ──
+# ── shortcut-retry-on-fail: non-programmer prompts exclude retry context ──
 
 
 class TestOtherPromptsExcludeRetryContext:
-    """Tests that non-analyst prompt builders never include programmer retry context."""
+    """Tests that non-programmer prompt builders never include programmer retry context."""
 
     def setup_method(self):
         orch._explore_sent.clear()
@@ -2509,25 +2509,245 @@ class TestOtherPromptsExcludeRetryContext:
         orch.programmer_feedback = "None yet."
         orch.programmer_context_for_retry = "- Files changed: should_not_appear.py"
 
-    def test_programmer_prompt_excludes(self):
-        """6.10: build_programmer_prompt does not contain retry context."""
-        prompt = orch.build_programmer_prompt(2, 1, "analyst output")
-        assert "Previous round programmer changes" not in prompt
-
     def test_programmer_review_prompt_excludes(self):
-        """6.11: build_programmer_review_prompt does not contain retry context."""
+        """build_programmer_review_prompt does not contain retry context."""
         prompt = orch.build_programmer_review_prompt("programmer output")
+        assert "Your previous changes" not in prompt
         assert "Previous round programmer changes" not in prompt
 
     def test_analyst_review_prompt_excludes(self):
-        """6.12: build_analyst_review_prompt does not contain retry context."""
+        """build_analyst_review_prompt does not contain retry context."""
         prompt = orch.build_analyst_review_prompt("analyst output")
+        assert "Your previous changes" not in prompt
         assert "Previous round programmer changes" not in prompt
 
     def test_tester_prompt_excludes(self):
-        """6.13: build_tester_prompt does not contain retry context."""
+        """build_tester_prompt does not contain retry context."""
         prompt = orch.build_tester_prompt("programmer output")
+        assert "Your previous changes" not in prompt
         assert "Previous round programmer changes" not in prompt
+
+
+# ── shortcut-retry-on-fail: programmer retry prompt tests ──
+
+
+class TestProgrammerRetryPrompt:
+    """Tests for build_programmer_prompt retry behavior (round > 1)."""
+
+    def setup_method(self):
+        orch._explore_sent.clear()
+        orch.EXPLORE_SUMMARY = "Explore summary text."
+        orch.SCENARIO_TEST = "Run the test scenario."
+        orch.terminal_ids.update({
+            "analyst": "a001", "peer_analyst": "a002",
+            "programmer": "p001", "peer_programmer": "p002", "tester": "t001",
+        })
+        orch.feedback = "RESULT: FAIL\nEVIDENCE:\n- test_foo failed"
+        orch.analyst_feedback = "None yet."
+        orch.programmer_feedback = "None yet."
+
+    def test_retry_prompt_has_test_failure_feedback(self):
+        """Retry programmer prompt contains test failure feedback, not analyst handoff."""
+        orch.programmer_context_for_retry = ""
+        prompt = orch.build_programmer_prompt(2, 1, "analyst output")
+        assert "Test failure feedback:" in prompt
+        assert "RESULT: FAIL" in prompt
+        assert "test_foo failed" in prompt
+        assert "System analyst handoff:" not in prompt
+
+    def test_retry_prompt_includes_previous_changes_when_nonempty(self):
+        """Retry programmer prompt includes previous changes context when non-empty."""
+        orch.programmer_context_for_retry = "- Files changed: foo.py"
+        prompt = orch.build_programmer_prompt(2, 1, "analyst output")
+        assert "Your previous changes (context):" in prompt
+        assert "- Files changed: foo.py" in prompt
+
+    def test_retry_prompt_excludes_previous_changes_when_empty(self):
+        """Retry programmer prompt omits previous changes block when empty."""
+        orch.programmer_context_for_retry = ""
+        prompt = orch.build_programmer_prompt(2, 1, "analyst output")
+        assert "Your previous changes (context):" not in prompt
+
+    def test_retry_prompt_instructs_artifact_update(self):
+        """Retry programmer prompt includes explore/ff instructions for artifact updates."""
+        orch.programmer_context_for_retry = ""
+        prompt = orch.build_programmer_prompt(2, 1, "analyst output")
+        assert "/opsx:explore" in prompt
+        assert "/opsx:ff" in prompt
+
+    def test_round1_prompt_unchanged(self):
+        """Round 1 programmer prompt has analyst handoff, not test failure feedback."""
+        orch.programmer_context_for_retry = "- Files changed: foo.py"
+        analyst_out = (
+            "ANALYST_SUMMARY:\n"
+            "- OpenSpec artifacts created/updated: proposal.md\n"
+            "- Implementation notes for programmer: do X and Y\n"
+            "- Risks/assumptions: low risk"
+        )
+        prompt = orch.build_programmer_prompt(1, 1, analyst_out)
+        assert "System analyst handoff:" in prompt
+        assert "Implementation notes" in prompt
+        assert "Test failure feedback:" not in prompt
+        assert "Your previous changes (context):" not in prompt
+
+
+# ── shortcut-retry-on-fail: FAIL handler phase transition and output clearing ──
+
+
+class TestShortcutRetryFailHandler:
+    """Tests for handle_tester_fail(): phase transition and selective output clearing."""
+
+    def _setup_fail_state(self, analyst="analyst summary", programmer="programmer summary"):
+        """Set up globals to simulate state just before a FAIL handler call."""
+        orch.current_round = 1
+        orch.current_phase = orch.PHASE_TESTER
+        orch.outputs.update({
+            "analyst": analyst,
+            "analyst_review": "analyst review",
+            "programmer": programmer,
+            "programmer_review": "programmer review",
+            "tester": "RESULT: FAIL\nEVIDENCE:\n- something broke",
+        })
+
+    def test_fail_sets_phase_to_programmer(self):
+        """handle_tester_fail sets current_phase to PHASE_PROGRAMMER."""
+        self._setup_fail_state()
+        orch.handle_tester_fail()
+        assert orch.current_phase == orch.PHASE_PROGRAMMER
+
+    def test_fail_sets_phase_and_increments_round(self):
+        """handle_tester_fail sets phase to PROGRAMMER and increments round."""
+        self._setup_fail_state()
+        assert orch.current_round == 1
+        orch.handle_tester_fail()
+        assert orch.current_phase == orch.PHASE_PROGRAMMER
+        assert orch.current_round == 2
+
+    def test_fail_preserves_analyst_outputs(self):
+        """handle_tester_fail preserves analyst and analyst_review outputs."""
+        self._setup_fail_state(analyst="analyst summary text")
+        orch.outputs["analyst_review"] = "analyst review text"
+        orch.handle_tester_fail()
+        assert orch.outputs["analyst"] == "analyst summary text"
+        assert orch.outputs["analyst_review"] == "analyst review text"
+
+    def test_fail_clears_programmer_and_tester_outputs(self):
+        """handle_tester_fail clears programmer, programmer_review, and tester outputs."""
+        self._setup_fail_state()
+        orch.handle_tester_fail()
+        assert orch.outputs["programmer"] == ""
+        assert orch.outputs["programmer_review"] == ""
+        assert orch.outputs["tester"] == ""
+
+    def test_fail_extracts_feedback_and_context(self):
+        """handle_tester_fail populates feedback and programmer_context_for_retry."""
+        self._setup_fail_state(programmer="- Files changed: bar.py\n- Behavior implemented: baz")
+        orch.handle_tester_fail()
+        assert "RESULT: FAIL" in orch.feedback
+        assert "something broke" in orch.feedback
+        # programmer_context_for_retry is set from the programmer output
+        assert orch.programmer_context_for_retry != ""
+
+    def test_resume_retry_state_does_not_fallback_to_analyst(self, tmp_path):
+        """Resume with current_round=2, current_phase=programmer stays on programmer.
+
+        Exercises the same guard condition used in main() at the programmer phase:
+        ``if not outputs["analyst"].strip()`` triggers fallback to analyst.
+        With preserved analyst output, the guard does NOT trigger.
+        """
+        state_file = tmp_path / "state.json"
+        state_file.write_text(json.dumps({
+            "current_round": 2,
+            "current_phase": "programmer",
+            "final_status": "RUNNING",
+            "session_name": "cao-test",
+            "terminals": {
+                "analyst": {"id": "a1", "provider": "codex"},
+                "peer_analyst": {"id": "a2", "provider": "codex"},
+                "programmer": {"id": "p1", "provider": "codex"},
+                "peer_programmer": {"id": "p2", "provider": "codex"},
+                "tester": {"id": "t1", "provider": "codex"},
+            },
+            "feedback": "RESULT: FAIL",
+            "analyst_feedback": "None yet.",
+            "programmer_feedback": "None yet.",
+            "programmer_context_for_retry": "- Files changed: foo.py",
+            "outputs": {
+                "analyst": "analyst summary from round 1",
+                "analyst_review": "analyst review from round 1",
+                "programmer": "",
+                "programmer_review": "",
+                "tester": "",
+            },
+        }))
+        original_state_file = orch.STATE_FILE
+        try:
+            orch.STATE_FILE = str(state_file)
+            assert orch.load_state() is True
+            assert orch.current_round == 2
+            assert orch.current_phase == orch.PHASE_PROGRAMMER
+            # Exercise the actual guard condition from main()'s programmer phase
+            guard_would_fallback = not orch.outputs["analyst"].strip()
+            assert not guard_would_fallback, "Guard should NOT trigger fallback with preserved analyst output"
+        finally:
+            orch.STATE_FILE = original_state_file
+
+    def test_resume_retry_state_with_empty_analyst_falls_back(self, tmp_path):
+        """Resume with current_round=2, current_phase=programmer, empty analyst triggers fallback.
+
+        Exercises the same guard condition used in main() at the programmer phase:
+        ``if not outputs["analyst"].strip()`` triggers fallback to PHASE_ANALYST.
+        With empty analyst output, the guard DOES trigger.
+        """
+        state_file = tmp_path / "state.json"
+        state_file.write_text(json.dumps({
+            "current_round": 2,
+            "current_phase": "programmer",
+            "final_status": "RUNNING",
+            "session_name": "cao-test",
+            "terminals": {
+                "analyst": {"id": "a1", "provider": "codex"},
+                "peer_analyst": {"id": "a2", "provider": "codex"},
+                "programmer": {"id": "p1", "provider": "codex"},
+                "peer_programmer": {"id": "p2", "provider": "codex"},
+                "tester": {"id": "t1", "provider": "codex"},
+            },
+            "feedback": "RESULT: FAIL",
+            "analyst_feedback": "None yet.",
+            "programmer_feedback": "None yet.",
+            "programmer_context_for_retry": "",
+            "outputs": {
+                "analyst": "",
+                "analyst_review": "",
+                "programmer": "",
+                "programmer_review": "",
+                "tester": "",
+            },
+        }))
+        original_state_file = orch.STATE_FILE
+        try:
+            orch.STATE_FILE = str(state_file)
+            assert orch.load_state() is True
+            assert orch.current_phase == orch.PHASE_PROGRAMMER
+            # Exercise the actual guard condition from main()'s programmer phase
+            guard_would_fallback = not orch.outputs["analyst"].strip()
+            assert guard_would_fallback, "Guard SHOULD trigger fallback with empty analyst output"
+            # Simulate what main() does when guard triggers
+            orch.current_phase = orch.PHASE_ANALYST
+            assert orch.current_phase == orch.PHASE_ANALYST
+        finally:
+            orch.STATE_FILE = original_state_file
+
+    def test_start_agent_programmer_fail_uses_short_retry(self):
+        """START_AGENT=programmer with FAIL uses shortened retry (no analyst fallback)."""
+        # When START_AGENT=programmer, outputs["analyst"] has the placeholder
+        self._setup_fail_state(analyst=orch._UPSTREAM_PLACEHOLDER)
+        orch.handle_tester_fail()
+
+        assert orch.current_phase == orch.PHASE_PROGRAMMER
+        assert orch.outputs["analyst"] == orch._UPSTREAM_PLACEHOLDER
+        # The placeholder is non-empty, so programmer phase guard won't fallback
+        assert orch.outputs["analyst"].strip()
 
 
 # ── improve-fail-handoff: MAX_TEST_EVIDENCE_LINES config pipeline ──
@@ -2704,7 +2924,6 @@ class TestPostGitCommit:
         monkeypatch.setattr(orch, "POST_GIT_COMMIT", False)
         result = orch.post_git_commit("/any/path")
         assert result is True
-
 
 class TestRunPostProcessing:
     def test_both_disabled_is_noop(self, monkeypatch):

@@ -725,11 +725,6 @@ def build_analyst_prompt(round_num: int, analyst_cycle: int) -> str:
         "Latest tester feedback:",
         feedback,
     ]
-    if round_num > 1 and programmer_context_for_retry:
-        parts.extend([
-            "Previous round programmer changes (context only):",
-            programmer_context_for_retry,
-        ])
     parts.extend([
         "Latest peer analyst feedback:",
         analyst_feedback,
@@ -794,17 +789,37 @@ def build_programmer_prompt(
     programmer_cycle: int,
     analyst_out: str,
 ) -> str:
-    if CONDENSE_UPSTREAM_ON_REPEAT and programmer_cycle > 1:
-        analyst_block = "(Same analyst output as previous cycle -- refer to conversation history.)"
-    else:
-        analyst_block = condense_analyst_for_programmer(analyst_out)
-
     parts = [
         explore_block_for(terminal_ids["programmer"]),
         "",
-        "System analyst handoff:",
-        analyst_block,
-        "",
+    ]
+
+    if round_num > 1:
+        # Retry round: use test failure feedback instead of analyst handoff
+        parts.extend([
+            "Test failure feedback:",
+            feedback,
+            "",
+        ])
+        if programmer_context_for_retry:
+            parts.extend([
+                "Your previous changes (context):",
+                programmer_context_for_retry,
+                "",
+            ])
+    else:
+        # Round 1: normal analyst handoff
+        if CONDENSE_UPSTREAM_ON_REPEAT and programmer_cycle > 1:
+            analyst_block = "(Same analyst output as previous cycle -- refer to conversation history.)"
+        else:
+            analyst_block = condense_analyst_for_programmer(analyst_out)
+        parts.extend([
+            "System analyst handoff:",
+            analyst_block,
+            "",
+        ])
+
+    parts.extend([
         f"Programmer review cycle: {programmer_cycle}",
         "Latest peer programmer feedback:",
         programmer_feedback,
@@ -816,13 +831,27 @@ def build_programmer_prompt(
         "Autonomy rules: write temporary artifacts only under .tmp/ or /tmp/",
         "",
         "Task:",
-        "1) Apply OpenSpec changes using openspec-apply-change skill.",
-        "2) Implement required code changes.",
-        "3) Return PROGRAMMER_SUMMARY exactly as profile format.",
-        "4) For optional local validation, do not assume plain pytest.",
-        f"5) {_test_command_instruction()}",
-        response_file_instruction("programmer"),
-    ]
+    ])
+
+    if round_num > 1:
+        parts.extend([
+            "1) Run /opsx:explore to investigate the test failure described above.",
+            "2) If the failure indicates a spec/design issue, run /opsx:ff to update OpenSpec artifacts.",
+            "3) Implement required code fixes.",
+            "4) Return PROGRAMMER_SUMMARY exactly as profile format.",
+            "5) For optional local validation, do not assume plain pytest.",
+            f"6) {_test_command_instruction()}",
+        ])
+    else:
+        parts.extend([
+            "1) Apply OpenSpec changes using openspec-apply-change skill.",
+            "2) Implement required code changes.",
+            "3) Return PROGRAMMER_SUMMARY exactly as profile format.",
+            "4) For optional local validation, do not assume plain pytest.",
+            f"5) {_test_command_instruction()}",
+        ])
+
+    parts.append(response_file_instruction("programmer"))
     return "\n".join(parts)
 
 
@@ -876,6 +905,32 @@ def build_tester_prompt(programmer_out: str) -> str:
         "3) STOP. Do not take any further action after writing the response file.",
     ]
     return "\n".join(parts)
+
+
+# ── 9b. FAIL handler (extracted for testability) ─────────────────────────
+
+
+def handle_tester_fail() -> None:
+    """Process a tester FAIL result: save context, transition to retry state.
+
+    Sets current_phase to PHASE_PROGRAMMER (shortened retry pipeline),
+    increments current_round, and selectively clears outputs (preserving
+    analyst outputs).
+    """
+    global feedback, programmer_context_for_retry
+    global current_phase, current_round
+    global analyst_feedback, programmer_feedback
+
+    feedback = extract_test_evidence(outputs["tester"])
+    programmer_context_for_retry = condense_programmer_for_tester(outputs["programmer"])
+
+    current_phase = PHASE_PROGRAMMER
+    current_round += 1
+    analyst_feedback = "None yet."
+    programmer_feedback = "None yet."
+    outputs["programmer"] = ""
+    outputs["programmer_review"] = ""
+    outputs["tester"] = ""
 
 
 # ── 10. State management ───────────────────────────────────────────────────
@@ -1517,17 +1572,10 @@ def main() -> None:
                 cleanup(_save=False)
                 sys.exit(0)
 
-            feedback = extract_test_evidence(outputs["tester"])
-            programmer_context_for_retry = condense_programmer_for_tester(outputs["programmer"])
             log(f"[round {rnd}] tester: FAIL, retrying with feedback")
             log("FINAL: FAIL (retrying)")
 
-            current_round += 1
-            current_phase = PHASE_ANALYST
-            analyst_feedback = "None yet."
-            programmer_feedback = "None yet."
-            for key in outputs:
-                outputs[key] = ""
+            handle_tester_fail()
             save_state()
 
     # ── Max rounds exhausted ────────────────────────────────────────────

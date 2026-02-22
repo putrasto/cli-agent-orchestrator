@@ -1,3 +1,5 @@
+## MODIFIED Requirements
+
 ### Requirement: Condensed programmer summary carried on FAIL retry
 On tester FAIL, the orchestrator SHALL save a condensed version of the programmer's output before clearing programmer/tester outputs. The condensed content SHALL be produced by `condense_programmer_for_tester()` (extracting "Files changed" and "Behavior implemented" sections, capped at `MAX_CROSS_PHASE_LINES`). This content SHALL be stored in a module-level global `programmer_context_for_retry`.
 
@@ -53,3 +55,13 @@ The `build_programmer_prompt()` function SHALL include `programmer_context_for_r
 #### Scenario: Analyst review prompt has no retry context
 - **WHEN** `programmer_context_for_retry` is non-empty
 - **THEN** the output of `build_analyst_review_prompt()` SHALL NOT contain "Your previous changes" or "Previous round programmer changes"
+
+## REMOVED Requirements
+
+### Requirement: Analyst prompt includes programmer context on retry rounds
+**Reason**: The analyst is no longer invoked on retry rounds due to the shortened retry pipeline. The programmer receives the retry context directly instead.
+**Migration**: `programmer_context_for_retry` is now included in `build_programmer_prompt()` on retry rounds (see modified requirement "Programmer prompt includes retry context on retry rounds" above).
+
+### Requirement: Other agent prompts never include programmer retry context
+**Reason**: Replaced by modified requirement "Non-programmer prompts exclude retry context" above, which narrows the scope — `build_programmer_prompt()` now includes retry context on retry rounds, while all other prompt builders remain excluded.
+**Migration**: No code migration needed. The exclusion still applies to all non-programmer prompts.

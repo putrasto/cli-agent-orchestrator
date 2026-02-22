@@ -100,7 +100,9 @@ The orchestrator SHALL use an `ApiClient` class wrapping `httpx.Client` with met
 ### Requirement: Prompt builders for all five agents
 The orchestrator SHALL have prompt builder functions for analyst, analyst review, programmer, programmer review, and tester. Each SHALL include the appropriate explore block, guard lines, task instructions, and response file instruction.
 
-On retry rounds (round > 1), `build_analyst_prompt()` SHALL instruct the analyst to first use the OpenSpec explore skill to investigate the test failure, then use the OpenSpec fast-forward skill to update artifacts.
+On retry rounds (round > 1), `build_analyst_prompt()` SHALL instruct the analyst to first use the OpenSpec explore skill to investigate the test failure, then use the OpenSpec fast-forward skill to update artifacts. Note: the analyst is not invoked on retry rounds due to the shortened retry pipeline, but the prompt builder retains this behavior for correctness if called.
+
+`build_programmer_prompt()` SHALL accept a `round_num` parameter. On round 1, the prompt SHALL include the analyst handoff as the upstream context. On retry rounds (`round_num > 1`), the prompt SHALL replace the analyst handoff with test failure feedback and previous changes context (see `shortcut-retry-pipeline` spec for details).
 
 #### Scenario: Analyst prompt structure on round 1
 - **WHEN** `build_analyst_prompt()` is called with `round_num=1`
@@ -111,8 +113,12 @@ On retry rounds (round > 1), `build_analyst_prompt()` SHALL instruct the analyst
 - **THEN** the task instructions SHALL include "Use the OpenSpec explore skill to investigate the test failure" followed by "use the OpenSpec fast-forward skill to update the artifacts"
 
 #### Scenario: Programmer prompt condenses upstream on repeat
-- **WHEN** `build_programmer_prompt()` is called with cycle > 1 and `CONDENSE_UPSTREAM_ON_REPEAT` is true
+- **WHEN** `build_programmer_prompt()` is called with `round_num=1`, cycle > 1, and `CONDENSE_UPSTREAM_ON_REPEAT` is true
 - **THEN** the analyst output SHALL be replaced with a back-reference
+
+#### Scenario: Programmer prompt on retry round uses test failure context
+- **WHEN** `build_programmer_prompt()` is called with `round_num=2`
+- **THEN** the prompt SHALL contain test failure feedback instead of analyst handoff
 
 ### Requirement: State file with backward read-compatibility (Python only)
 `save_state()` SHALL write JSON with `version: 1` and the same field structure as before: `updated_at`, `api`, `provider`, `wd`, `prompt`, `current_round`, `current_phase`, `final_status`, `session_name`, `terminals` (analyst, peer_analyst, programmer, peer_programmer, tester), `feedback`, `analyst_feedback`, `programmer_feedback`, `outputs` (analyst, analyst_review, programmer, programmer_review, tester).
