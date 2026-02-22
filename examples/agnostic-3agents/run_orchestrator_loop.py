@@ -74,6 +74,7 @@ _CONFIG_KEYS: list[tuple[str, str, object, type]] = [
     ("start_agent",                                "START_AGENT",                        "analyst",              str),
     ("post_processing.openspec_archive",           "POST_OPENSPEC_ARCHIVE",              False,                  bool),
     ("post_processing.git_commit",                 "POST_GIT_COMMIT",                    False,                  bool),
+    ("post_processing.git_commit_comment",          "POST_GIT_COMMIT_COMMENT",            "",                     str),
 ]
 
 
@@ -216,7 +217,7 @@ def _apply_config(cfg: dict) -> None:
     global STATE_FILE, CLEANUP_ON_EXIT
     global RESPONSE_TIMEOUT, IDLE_GRACE_SECONDS, STRICT_FILE_HANDOFF, MAX_FILE_REMINDERS
     global RESPONSE_DIR, AGENT_CONFIG, START_AGENT
-    global POST_OPENSPEC_ARCHIVE, POST_GIT_COMMIT
+    global POST_OPENSPEC_ARCHIVE, POST_GIT_COMMIT, POST_GIT_COMMIT_COMMENT
 
     API = cfg["API"]
     PROVIDER = cfg["PROVIDER"]
@@ -249,6 +250,7 @@ def _apply_config(cfg: dict) -> None:
     START_AGENT = cfg["START_AGENT"]
     POST_OPENSPEC_ARCHIVE = cfg["POST_OPENSPEC_ARCHIVE"]
     POST_GIT_COMMIT = cfg["POST_GIT_COMMIT"]
+    POST_GIT_COMMIT_COMMENT = cfg["POST_GIT_COMMIT_COMMENT"]
 
 
 # Initialize globals from env vars only (no JSON file at import time).
@@ -1320,8 +1322,9 @@ def post_git_commit(wd: str) -> bool:
             return False
 
         # Commit
+        commit_msg = POST_GIT_COMMIT_COMMENT if POST_GIT_COMMIT_COMMENT else "Orchestrator PASS: auto-commit changes"
         result = subprocess.run(
-            ["git", "commit", "-m", "Orchestrator PASS: auto-commit changes"],
+            ["git", "commit", "-m", commit_msg],
             cwd=wd, capture_output=True, text=True,
         )
         if result.returncode == 0:
