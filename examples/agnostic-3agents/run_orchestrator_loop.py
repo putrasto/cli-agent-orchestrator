@@ -536,9 +536,39 @@ def wait_for_response_file(
         time.sleep(POLL_SECONDS)
 
 
+_settle_confirmed: set[str] = set()
+
+
+def _wait_for_settle(terminal_id: str, timeout: float = 10.0) -> None:
+    """Wait for terminal to confirm idle/completed before first prompt dispatch.
+
+    Claude Code may show its prompt (detected as IDLE) before its input handler
+    is fully ready. This brief poll ensures the terminal has settled. Only runs
+    once per terminal — subsequent sends skip the check.
+    """
+    if terminal_id in _settle_confirmed:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = api.get_status(terminal_id)
+        if status in ("idle", "completed"):
+            # Confirm idle twice with a gap to avoid transient detection
+            time.sleep(1)
+            status2 = api.get_status(terminal_id)
+            if status2 in ("idle", "completed"):
+                _settle_confirmed.add(terminal_id)
+                return
+        time.sleep(POLL_SECONDS)
+    # Timeout: proceed anyway, the startup guard in wait_for_response_file
+    # will handle the case where the agent doesn't start processing.
+    log(f"[{terminal_id}] settle check timed out after {timeout}s, proceeding")
+    _settle_confirmed.add(terminal_id)
+
+
 def send_and_wait(terminal_id: str, role: str, message: str) -> str:
     """Clear stale file, send prompt, wait for response file."""
     clear_stale_response(role)
+    _wait_for_settle(terminal_id)
     api.send_input(terminal_id, message)
     return wait_for_response_file(role, terminal_id)
 

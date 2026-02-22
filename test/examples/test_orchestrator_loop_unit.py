@@ -1352,15 +1352,45 @@ class TestFileReminder:
 
 class TestSendAndWait:
     @patch("run_orchestrator_loop.wait_for_response_file", return_value="response content")
+    @patch("run_orchestrator_loop._wait_for_settle")
     @patch("run_orchestrator_loop.clear_stale_response")
     @patch.object(orch.api, "send_input")
-    def test_clears_sends_waits(self, mock_send, mock_clear, mock_wait):
+    def test_clears_sends_waits(self, mock_send, mock_clear, mock_settle, mock_wait):
         result = orch.send_and_wait("term-001", "analyst", "do analysis")
 
         mock_clear.assert_called_once_with("analyst")
+        mock_settle.assert_called_once_with("term-001")
         mock_send.assert_called_once_with("term-001", "do analysis")
         mock_wait.assert_called_once_with("analyst", "term-001")
         assert result == "response content"
+
+
+# ── settle check before first prompt dispatch ───────────────────────────────
+
+
+class TestWaitForSettle:
+    def setup_method(self):
+        orch._settle_confirmed.clear()
+
+    def teardown_method(self):
+        orch._settle_confirmed.clear()
+
+    @patch.object(orch.api, "get_status", side_effect=["idle", "idle"])
+    def test_confirms_on_double_idle(self, mock_status):
+        orch._wait_for_settle("term-001", timeout=5.0)
+        assert "term-001" in orch._settle_confirmed
+        assert mock_status.call_count == 2
+
+    def test_skips_already_confirmed(self):
+        orch._settle_confirmed.add("term-001")
+        with patch.object(orch.api, "get_status") as mock_status:
+            orch._wait_for_settle("term-001")
+            mock_status.assert_not_called()
+
+    @patch.object(orch.api, "get_status", side_effect=["processing", "idle", "idle"])
+    def test_retries_until_idle(self, mock_status):
+        orch._wait_for_settle("term-001", timeout=30.0)
+        assert "term-001" in orch._settle_confirmed
 
 
 # ── response_file_instruction heredoc fix ───────────────────────────────────
