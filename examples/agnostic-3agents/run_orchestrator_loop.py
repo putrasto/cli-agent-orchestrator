@@ -1284,6 +1284,47 @@ def post_openspec_archive(wd: str) -> str:
         return "failed"
 
 
+_SUSPICIOUS_FILE_RE = re.compile(
+    r"[,;()\[\]{}=]"       # Python/shell syntax characters in filename
+    r"|^\s"                 # leading whitespace
+    r"|\s$"                 # trailing whitespace
+    r"|\.get\(|\.set\("    # method calls
+    r"|>>|<<"               # shell redirects
+)
+
+
+def _unstage_suspicious_files(wd: str) -> None:
+    """Detect and unstage files with names that look like code fragments.
+
+    Agent shell errors (e.g. broken heredocs) can create files whose names
+    are Python/shell code snippets. These should never be committed.
+    Also deletes the accidental files from disk.
+    """
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=A"],
+        cwd=wd, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return
+
+    for path in result.stdout.splitlines():
+        name = path.strip()
+        if not name:
+            continue
+        basename = name.rsplit("/", 1)[-1]
+        if _SUSPICIOUS_FILE_RE.search(basename):
+            log(f"Post-processing: unstaging suspicious file: {name}")
+            subprocess.run(
+                ["git", "reset", "HEAD", "--", name],
+                cwd=wd, capture_output=True, text=True,
+            )
+            # Remove the accidental file from disk
+            full = Path(wd) / name
+            if full.is_file():
+                full.unlink()
+                log(f"Post-processing: deleted accidental file: {name}")
+
+
 def post_git_commit(wd: str) -> bool:
     """Stage all changes and commit in wd. Returns True on success."""
     if not POST_GIT_COMMIT:
@@ -1307,6 +1348,9 @@ def post_git_commit(wd: str) -> bool:
             stderr = add_result.stderr.strip() or add_result.stdout.strip()
             log(f"Post-processing: git add failed: {stderr}")
             return False
+
+        # Unstage accidental files (code fragments created by agent shell errors)
+        _unstage_suspicious_files(wd)
 
         # Check for staged changes (exit 0 = no changes, 1 = has changes, >1 = error)
         diff_check = subprocess.run(

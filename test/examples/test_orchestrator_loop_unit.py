@@ -2901,11 +2901,12 @@ class TestPostGitCommit:
             mock_run.side_effect = [
                 MagicMock(returncode=0),  # git rev-parse
                 MagicMock(returncode=0),  # git add -A
+                MagicMock(returncode=0, stdout=""),  # _unstage_suspicious_files
                 MagicMock(returncode=0),  # git diff --cached --quiet (no changes)
             ]
             result = orch.post_git_commit(str(tmp_path))
         assert result is True
-        assert mock_run.call_count == 3
+        assert mock_run.call_count == 4
 
     def test_not_a_git_repo(self, tmp_path, monkeypatch):
         monkeypatch.setattr(orch, "POST_GIT_COMMIT", True)
@@ -2921,6 +2922,7 @@ class TestPostGitCommit:
             mock_run.side_effect = [
                 MagicMock(returncode=0),  # git rev-parse
                 MagicMock(returncode=0),  # git add -A
+                MagicMock(returncode=0, stdout=""),  # _unstage_suspicious_files
                 MagicMock(returncode=1),  # git diff --cached --quiet (has changes)
                 MagicMock(returncode=1, stdout="", stderr="commit failed"),  # git commit
             ]
@@ -2944,11 +2946,12 @@ class TestPostGitCommit:
             mock_run.side_effect = [
                 MagicMock(returncode=0),  # git rev-parse
                 MagicMock(returncode=0),  # git add -A
+                MagicMock(returncode=0, stdout=""),  # _unstage_suspicious_files
                 MagicMock(returncode=129, stdout="", stderr="diff error"),  # git diff error
             ]
             result = orch.post_git_commit(str(tmp_path))
         assert result is False
-        assert mock_run.call_count == 3
+        assert mock_run.call_count == 4
 
     def test_skipped_when_disabled(self, monkeypatch):
         monkeypatch.setattr(orch, "POST_GIT_COMMIT", False)
