@@ -31,12 +31,14 @@ RESPONSE_PATTERN = r"⏺(?:\x1b\[[0-9;]*m)*\s+"  # Handle any ANSI codes between
 # - New format: "✽ Cooking… (6s · ↓ 174 tokens · thinking)"
 # Common: spinner char + text + ellipsis + parenthesized status
 PROCESSING_PATTERN = r"[✶✢✽✻·✳].*….*\(.*\)"
-IDLE_PROMPT_PATTERN = r"[>❯][\s\xa0]"  # Handle both old ">" and new "❯" prompt styles
+# Prompt at start of line — may include placeholder text (e.g. ❯ Try "how do I…")
+IDLE_PROMPT_PATTERN = r"^[>❯]\s"
 WAITING_USER_ANSWER_PATTERN = (
     r"❯.*\d+\."  # Pattern for Claude showing selection options with arrow cursor
 )
 TRUST_PROMPT_PATTERN = r"Yes, I trust this folder"  # Workspace trust dialog
-IDLE_PROMPT_PATTERN_LOG = r"[>❯][\s\xa0]"  # Same pattern for log files
+ERROR_OUTPUT_PATTERN = r"(?:Error:|error:|ERROR|FATAL|Traceback \(most recent)"  # Hard failure
+IDLE_PROMPT_PATTERN_LOG = r"[>❯]"  # Same pattern for log files
 
 
 class ClaudeCodeProvider(BaseProvider):
@@ -103,7 +105,9 @@ class ClaudeCodeProvider(BaseProvider):
 
         # Use shlex.join() for proper shell escaping of all arguments
         # This correctly handles multiline strings, quotes, and special characters
-        return shlex.join(command_parts)
+        # Prefix with env -u CLAUDECODE to bypass the nested-session guard when
+        # CAO is launched from within a Claude Code session
+        return f"env -u CLAUDECODE {shlex.join(command_parts)}"
 
     def _handle_trust_prompt(self, timeout: float = 20.0) -> None:
         """Auto-accept the workspace trust prompt if it appears.
@@ -132,10 +136,15 @@ class ClaudeCodeProvider(BaseProvider):
                     pane.send_keys("", enter=True)
                 return
 
-            # Check if Claude Code has fully started (welcome banner visible)
-            # Use a specific pattern that only appears in the welcome screen
+            # Check if Claude Code has fully started (welcome banner or idle prompt)
             if re.search(r"Welcome to|Claude Code v\d+", clean_output):
                 logger.info("Claude Code started without trust prompt")
+                return
+
+            # Also exit early if idle prompt is already visible (e.g. when
+            # --dangerously-skip-permissions suppresses the welcome banner)
+            if re.search(IDLE_PROMPT_PATTERN, clean_output):
+                logger.info("Claude Code started without trust prompt (idle prompt detected)")
                 return
 
             time.sleep(1.0)
@@ -164,7 +173,12 @@ class ClaudeCodeProvider(BaseProvider):
         return True
 
     def get_status(self, tail_lines: Optional[int] = None) -> TerminalStatus:
-        """Get Claude Code status by analyzing terminal output."""
+        """Get Claude Code status by analyzing terminal output.
+
+        Idle/completed detection checks only the last non-blank line of output,
+        preventing false positives from old prompts in scrollback while the agent
+        is actively running tools.
+        """
 
         # Use tmux client singleton to get window history
         output = tmux_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
@@ -172,27 +186,53 @@ class ClaudeCodeProvider(BaseProvider):
         if not output:
             return TerminalStatus.ERROR
 
-        # Check for processing state first
-        if re.search(PROCESSING_PATTERN, output):
+        # Strip ALL ANSI/CSI escape sequences (colors, cursor control, erase, etc.)
+        # so trailing cursor codes like \x1b[?25h don't create ghost "non-blank" lines
+        output = re.sub(r"\x1b\[[\d;?]*[a-zA-Z]", "", output)
+
+        # Take last 15 non-blank lines for spinner/error/waiting detection
+        lines = output.split("\n")
+        tail_output = "\n".join(lines[-15:]) if len(lines) > 15 else output
+
+        # Check for processing state first (spinner in recent output)
+        if re.search(PROCESSING_PATTERN, tail_output):
             return TerminalStatus.PROCESSING
 
         # Check for waiting user answer (Claude asking for user selection)
         # Exclude the workspace trust prompt which also matches the pattern
-        if re.search(WAITING_USER_ANSWER_PATTERN, output) and not re.search(
-            TRUST_PROMPT_PATTERN, output
+        if re.search(WAITING_USER_ANSWER_PATTERN, tail_output) and not re.search(
+            TRUST_PROMPT_PATTERN, tail_output
         ):
             return TerminalStatus.WAITING_USER_ANSWER
 
-        # Check for completed state (has response + ready prompt)
-        if re.search(RESPONSE_PATTERN, output) and re.search(IDLE_PROMPT_PATTERN, output):
+        # Find the LAST ❯ prompt at start-of-line in tail output.
+        # Then check whether a response marker (⏺) appears AFTER that prompt.
+        # - No ⏺ after last ❯ → agent is idle (or completed if ⏺ exists earlier)
+        # - ⏺ after last ❯ → prompt is stale, agent is still processing
+        last_prompt_match = None
+        for m in re.finditer(IDLE_PROMPT_PATTERN, tail_output, re.MULTILINE):
+            last_prompt_match = m
+
+        has_idle_prompt = False
+        if last_prompt_match:
+            text_after_prompt = tail_output[last_prompt_match.end() :]
+            if not re.search(RESPONSE_PATTERN, text_after_prompt):
+                has_idle_prompt = True
+
+        # Check for completed state (has response earlier + idle prompt)
+        if re.search(RESPONSE_PATTERN, output) and has_idle_prompt:
             return TerminalStatus.COMPLETED
 
-        # Check for idle state (just ready prompt, no response)
-        if re.search(IDLE_PROMPT_PATTERN, output):
+        # Check for idle state (just prompt, no response)
+        if has_idle_prompt:
             return TerminalStatus.IDLE
 
-        # If no recognizable state, return ERROR
-        return TerminalStatus.ERROR
+        # Check for error patterns only when no idle prompt is visible
+        if re.search(ERROR_OUTPUT_PATTERN, tail_output):
+            return TerminalStatus.ERROR
+
+        # No prompt or spinner visible — agent is likely running tools
+        return TerminalStatus.PROCESSING
 
     def get_idle_pattern_for_log(self) -> str:
         """Return Claude Code IDLE prompt pattern for log files."""

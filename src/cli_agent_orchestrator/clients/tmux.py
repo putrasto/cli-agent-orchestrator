@@ -56,6 +56,9 @@ class TmuxClient:
 
             environment = os.environ.copy()
             environment["CAO_TERMINAL_ID"] = terminal_id
+            # Remove Claude Code session marker so spawned agents don't get
+            # blocked by the nested-session guard
+            environment.pop("CLAUDECODE", None)
 
             session = self.server.new_session(
                 session_name=session_name,
