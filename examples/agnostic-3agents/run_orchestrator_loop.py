@@ -71,6 +71,7 @@ _CONFIG_KEYS: list[tuple[str, str, object, type]] = [
     ("handoff.idle_grace_seconds",                 "IDLE_GRACE_SECONDS",                 30,                     int),
     ("handoff.response_timeout",                   "RESPONSE_TIMEOUT",                   1800,                   int),
     ("handoff.max_file_reminders",                 "MAX_FILE_REMINDERS",                 1,                      int),
+    ("handoff.auto_accept_permissions",            "AUTO_ACCEPT_PERMISSIONS",            False,                  bool),
     ("start_agent",                                "START_AGENT",                        "analyst",              str),
     ("post_processing.openspec_archive",           "POST_OPENSPEC_ARCHIVE",              False,                  bool),
     ("post_processing.git_commit",                 "POST_GIT_COMMIT",                    False,                  bool),
@@ -216,6 +217,7 @@ def _apply_config(cfg: dict) -> None:
     global CONDENSE_CROSS_PHASE, MAX_CROSS_PHASE_LINES
     global STATE_FILE, CLEANUP_ON_EXIT
     global RESPONSE_TIMEOUT, IDLE_GRACE_SECONDS, STRICT_FILE_HANDOFF, MAX_FILE_REMINDERS
+    global AUTO_ACCEPT_PERMISSIONS
     global RESPONSE_DIR, AGENT_CONFIG, START_AGENT
     global POST_OPENSPEC_ARCHIVE, POST_GIT_COMMIT, POST_GIT_COMMIT_COMMENT
 
@@ -245,6 +247,7 @@ def _apply_config(cfg: dict) -> None:
     IDLE_GRACE_SECONDS = cfg["IDLE_GRACE_SECONDS"]
     STRICT_FILE_HANDOFF = cfg["STRICT_FILE_HANDOFF"]
     MAX_FILE_REMINDERS = max(0, cfg["MAX_FILE_REMINDERS"])
+    AUTO_ACCEPT_PERMISSIONS = cfg["AUTO_ACCEPT_PERMISSIONS"]
     RESPONSE_DIR = Path(WD) / ".tmp" / "agent-responses"
     AGENT_CONFIG = cfg["_agent_config"]
     START_AGENT = cfg["START_AGENT"]
@@ -429,6 +432,13 @@ def _build_file_reminder(role: str) -> str:
     )
 
 
+# Permission auto-accept state (per-terminal cooldown + per-turn safety cap)
+PERMISSION_ACCEPT_COOLDOWN = 5.0  # seconds between auto-accepts per terminal
+MAX_PERMISSION_ACCEPTS_PER_TURN = 20  # safety cap per agent turn
+_last_permission_accept: dict[str, float] = {}  # terminal_id -> last accept timestamp
+_permission_accept_count: dict[str, int] = {}  # terminal_id -> count this turn
+
+
 def wait_for_response_file(
     role: str,
     terminal_id: str,
@@ -467,6 +477,38 @@ def wait_for_response_file(
 
         if status == "error":
             raise RuntimeError(f"Terminal {terminal_id} entered ERROR state")
+
+        # Handle permission prompts (waiting_user_answer)
+        if status == "waiting_user_answer":
+            if AUTO_ACCEPT_PERMISSIONS:
+                now = time.monotonic()
+                last_accept = _last_permission_accept.get(terminal_id, 0.0)
+                if now - last_accept >= PERMISSION_ACCEPT_COOLDOWN:
+                    accept_count = _permission_accept_count.get(terminal_id, 0)
+                    if accept_count + 1 > MAX_PERMISSION_ACCEPTS_PER_TURN:
+                        raise RuntimeError(
+                            f"[{role}] Terminal {terminal_id} exceeded "
+                            f"MAX_PERMISSION_ACCEPTS_PER_TURN "
+                            f"({MAX_PERMISSION_ACCEPTS_PER_TURN})"
+                        )
+                    _permission_accept_count[terminal_id] = accept_count + 1
+                    count = _permission_accept_count[terminal_id]
+                    # Audit log with terminal snippet for traceability
+                    try:
+                        snippet = api.get_last_output(terminal_id)
+                        snippet_lines = snippet.strip().split("\n")[-5:]
+                        snippet_text = "\n  ".join(snippet_lines)
+                    except Exception:
+                        snippet_text = "(unable to retrieve terminal output)"
+                    log(f"[{role}] Permission prompt detected on {terminal_id}, "
+                        f"auto-accepting ({count}/{MAX_PERMISSION_ACCEPTS_PER_TURN})"
+                        f"\n  {snippet_text}")
+                    api.send_input(terminal_id, "y")
+                    _last_permission_accept[terminal_id] = now
+                    idle_since = None
+            else:
+                log(f"[{role}] Permission prompt detected on terminal {terminal_id} "
+                    f"but AUTO_ACCEPT_PERMISSIONS is off — agent is blocked")
 
         if p.exists() and status in ("idle", "completed"):
             content = p.read_text(encoding="utf-8").strip()
@@ -569,6 +611,7 @@ def _wait_for_settle(terminal_id: str, timeout: float = 10.0) -> None:
 
 def send_and_wait(terminal_id: str, role: str, message: str) -> str:
     """Clear stale file, send prompt, wait for response file."""
+    _permission_accept_count[terminal_id] = 0  # Reset per-turn safety cap
     clear_stale_response(role)
     _wait_for_settle(terminal_id)
     api.send_input(terminal_id, message)

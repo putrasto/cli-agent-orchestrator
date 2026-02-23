@@ -1365,6 +1365,221 @@ class TestSendAndWait:
         assert result == "response content"
 
 
+# ── permission auto-accept ───────────────────────────────────────────────────
+
+
+class TestPermissionAutoAccept:
+    """Tests for auto-accepting permission prompts in wait_for_response_file."""
+
+    def setup_method(self):
+        self._orig_dir = orch.RESPONSE_DIR
+        self._orig_strict = orch.STRICT_FILE_HANDOFF
+        self._orig_poll = orch.POLL_SECONDS
+        self._orig_grace = orch.IDLE_GRACE_SECONDS
+        self._orig_reminders = orch.MAX_FILE_REMINDERS
+        self._orig_wd = orch.WD
+        self._orig_ts = orch._run_timestamp
+        self._orig_seq = orch._response_seq
+        self._orig_auto = orch.AUTO_ACCEPT_PERMISSIONS
+        self._orig_perm_accept = orch._last_permission_accept.copy()
+        self._orig_perm_count = orch._permission_accept_count.copy()
+        self._orig_max_cap = orch.MAX_PERMISSION_ACCEPTS_PER_TURN
+
+    def teardown_method(self):
+        orch.RESPONSE_DIR = self._orig_dir
+        orch.STRICT_FILE_HANDOFF = self._orig_strict
+        orch.POLL_SECONDS = self._orig_poll
+        orch.IDLE_GRACE_SECONDS = self._orig_grace
+        orch.MAX_FILE_REMINDERS = self._orig_reminders
+        orch.WD = self._orig_wd
+        orch._run_timestamp = self._orig_ts
+        orch._response_seq = self._orig_seq
+        orch.AUTO_ACCEPT_PERMISSIONS = self._orig_auto
+        orch._last_permission_accept.clear()
+        orch._last_permission_accept.update(self._orig_perm_accept)
+        orch._permission_accept_count.clear()
+        orch._permission_accept_count.update(self._orig_perm_count)
+        orch.MAX_PERMISSION_ACCEPTS_PER_TURN = self._orig_max_cap
+
+    @patch("run_orchestrator_loop.log")
+    @patch.object(orch.api, "get_last_output", return_value="Would you like to run...")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    def test_auto_accept_sends_y_then_agent_completes(
+        self, mock_status, mock_send, mock_last_out, mock_log, tmp_path
+    ):
+        """waiting_user_answer + AUTO_ACCEPT=1 -> sends y -> agent completes."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.AUTO_ACCEPT_PERMISSIONS = True
+        resp_file = tmp_path / "analyst_summary.md"
+
+        call_count = [0]
+
+        def status_side_effect(tid):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "processing"  # agent started
+            if call_count[0] == 2:
+                return "waiting_user_answer"  # permission prompt
+            if call_count[0] == 3:
+                return "processing"  # resumed after accept
+            if not resp_file.exists():
+                resp_file.write_text("ANALYST_SUMMARY:\nDone after permission.")
+            return "idle"
+
+        mock_status.side_effect = status_side_effect
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=10)
+        assert "Done after permission." in result
+        mock_send.assert_called_once_with("term-001", "y")
+
+    @patch("run_orchestrator_loop.log")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    def test_warning_logged_when_auto_accept_off(
+        self, mock_status, mock_send, mock_log, tmp_path
+    ):
+        """waiting_user_answer + AUTO_ACCEPT=0 -> logs warning, no y sent."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.AUTO_ACCEPT_PERMISSIONS = False
+        orch.IDLE_GRACE_SECONDS = 0
+        orch.STRICT_FILE_HANDOFF = False
+        resp_file = tmp_path / "analyst_summary.md"
+
+        call_count = [0]
+
+        def status_side_effect(tid):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "waiting_user_answer"
+            # Simulate agent becoming idle (user manually accepted)
+            if not resp_file.exists():
+                resp_file.write_text("ANALYST_SUMMARY:\nManual accept.")
+            return "idle"
+
+        mock_status.side_effect = status_side_effect
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=10)
+        assert "Manual accept." in result
+        mock_send.assert_not_called()
+        # Check warning was logged
+        log_messages = [str(c) for c in mock_log.call_args_list]
+        assert any("AUTO_ACCEPT_PERMISSIONS is off" in msg for msg in log_messages)
+
+    @patch("run_orchestrator_loop.log")
+    @patch.object(orch.api, "get_last_output", return_value="permission prompt...")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    def test_safety_cap_exceeded_raises(
+        self, mock_status, mock_send, mock_last_out, mock_log, tmp_path
+    ):
+        """Exceeding MAX_PERMISSION_ACCEPTS_PER_TURN raises RuntimeError at send time."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.AUTO_ACCEPT_PERMISSIONS = True
+        orch.MAX_PERMISSION_ACCEPTS_PER_TURN = 2
+
+        # Pre-fill count so the next send would exceed the cap (2+1 > 2)
+        orch._permission_accept_count["term-001"] = 2
+
+        mock_status.side_effect = [
+            "processing",           # agent started
+            "waiting_user_answer",  # count=2, 2+1>2 -> raise at send time
+        ]
+
+        with pytest.raises(RuntimeError, match="MAX_PERMISSION_ACCEPTS_PER_TURN"):
+            orch.wait_for_response_file("analyst", "term-001", timeout=10)
+
+    @patch("run_orchestrator_loop.log")
+    @patch.object(orch.api, "get_last_output", return_value="permission prompt...")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    def test_cooldown_prevents_rapid_sends(
+        self, mock_status, mock_send, mock_last_out, mock_log, tmp_path
+    ):
+        """Repeated waiting_user_answer within cooldown -> only one y sent."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.AUTO_ACCEPT_PERMISSIONS = True
+        resp_file = tmp_path / "analyst_summary.md"
+
+        call_count = [0]
+        # Simulate: processing -> waiting (accept) -> waiting (cooldown) -> idle+file
+        mono_values = iter([
+            0.0,    # start
+            1.0,    # poll1 status=processing: elapsed check
+            2.0,    # poll2 status=waiting: now for cooldown (2-0 >= 5? no... wait)
+        ])
+        # Actually let me think through the time.monotonic calls more carefully.
+        # The function calls time.monotonic() at: start, then each loop iteration
+        # for elapsed check, and inside the waiting_user_answer handler for 'now'.
+        # Let me use a side_effect that returns incrementing values.
+
+        time_values = [0.0]  # start
+        # poll1: status=processing, agent_started branch, elapsed check, sleep
+        time_values.extend([1.0])  # elapsed check
+        # poll2: status=waiting_user_answer, now=2.0 (last_accept=0.0, 2-0>=5? no)
+        # -> cooldown not elapsed, skip send. Then elapsed check.
+        time_values.extend([2.0, 2.0])  # now, elapsed check
+        # poll3: status=waiting_user_answer, now=8.0 (8-0>=5? yes) -> send y
+        time_values.extend([8.0, 8.0])  # now, elapsed check
+        # poll4: status=processing, elapsed check
+        time_values.extend([9.0])  # elapsed check
+        # poll5: status=idle + file exists
+
+        real_monotonic = time.monotonic
+
+        mono_iter = iter(time_values)
+        original_sleep = time.sleep
+
+        def status_side_effect(tid):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "processing"
+            if call_count[0] <= 3:
+                return "waiting_user_answer"
+            if call_count[0] == 4:
+                return "processing"
+            if not resp_file.exists():
+                resp_file.write_text("ANALYST_SUMMARY:\nDone.")
+            return "idle"
+        mock_status.side_effect = status_side_effect
+
+        with patch("run_orchestrator_loop.time") as mock_time:
+            mock_time.monotonic = MagicMock(side_effect=time_values)
+            mock_time.sleep = MagicMock()
+
+            result = orch.wait_for_response_file("analyst", "term-001", timeout=60)
+
+        assert "Done." in result
+        # Only one y sent (at t=8, not at t=2 due to cooldown)
+        mock_send.assert_called_once_with("term-001", "y")
+
+    @patch("run_orchestrator_loop.wait_for_response_file", return_value="response content")
+    @patch("run_orchestrator_loop._wait_for_settle")
+    @patch("run_orchestrator_loop.clear_stale_response")
+    @patch.object(orch.api, "send_input")
+    def test_counter_resets_per_turn(self, mock_send, mock_clear, mock_settle, mock_wait):
+        """send_and_wait resets _permission_accept_count for the terminal."""
+        orch._permission_accept_count["term-001"] = 15  # stale count from previous turn
+        orch.send_and_wait("term-001", "analyst", "do analysis")
+        assert orch._permission_accept_count["term-001"] == 0
+
+
 # ── settle check before first prompt dispatch ───────────────────────────────
 
 

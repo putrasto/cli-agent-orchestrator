@@ -39,6 +39,13 @@ WAITING_USER_ANSWER_PATTERN = (
 TRUST_PROMPT_PATTERN = r"Yes, I trust this folder"  # Workspace trust dialog
 ERROR_OUTPUT_PATTERN = r"(?:Error:|error:|ERROR|FATAL|Traceback \(most recent)"  # Hard failure
 IDLE_PROMPT_PATTERN_LOG = r"[>❯]"  # Same pattern for log files
+# Permission prompt patterns — checked in order, match triggers WAITING_USER_ANSWER
+# unless an idle prompt appears after the match (stale prompt).
+PERMISSION_PROMPT_PATTERNS = [
+    r"Would you like to run",    # Command / MCP tool permission prompts
+    r"Do you want to .* outside",  # Sandbox escape confirmation
+    r"Allow .* to run",          # Generic allow phrasing
+]
 
 
 class ClaudeCodeProvider(BaseProvider):
@@ -204,6 +211,20 @@ class ClaudeCodeProvider(BaseProvider):
             TRUST_PROMPT_PATTERN, tail_output
         ):
             return TerminalStatus.WAITING_USER_ANSWER
+
+        # Check for permission prompt ("Would you like to run...", etc.)
+        # Find the latest match across ALL patterns, then check if an idle
+        # prompt appears after it.  This avoids missing an active prompt when
+        # an older stale prompt of a different pattern sits earlier in output.
+        latest_perm_end = -1
+        for pattern in PERMISSION_PROMPT_PATTERNS:
+            for m in re.finditer(pattern, tail_output):
+                if m.end() > latest_perm_end:
+                    latest_perm_end = m.end()
+        if latest_perm_end >= 0:
+            after_last_perm = tail_output[latest_perm_end:]
+            if not re.search(IDLE_PROMPT_PATTERN, after_last_perm, re.MULTILINE):
+                return TerminalStatus.WAITING_USER_ANSWER
 
         # Find the LAST ❯ prompt at start-of-line in tail output.
         # Then check whether a response marker (⏺) appears AFTER that prompt.

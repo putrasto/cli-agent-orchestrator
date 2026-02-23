@@ -209,6 +209,73 @@ class TestClaudeCodeGetStatus:
         provider = self._make_provider()
         assert provider.get_status() == TerminalStatus.COMPLETED
 
+    # ── Permission prompt detection tests ──────────────────────────────────
+
+    @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
+    def test_permission_prompt_command(self, mock_tmux):
+        """Active 'Would you like to run' permission prompt -> WAITING_USER_ANSWER."""
+        mock_tmux.get_history.return_value = (
+            "⏺ I need to run a command outside the sandbox.\n"
+            "\n"
+            "Would you like to run the following command?\n"
+            "Reason: Do you want me to run the frontend production build outside sandbox\n"
+        )
+        provider = self._make_provider()
+        assert provider.get_status() == TerminalStatus.WAITING_USER_ANSWER
+
+    @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
+    def test_permission_prompt_sandbox_escape(self, mock_tmux):
+        """Sandbox escape confirmation -> WAITING_USER_ANSWER."""
+        mock_tmux.get_history.return_value = (
+            "⏺ Running build.\n"
+            "\n"
+            "Do you want to run the build outside the sandbox?\n"
+        )
+        provider = self._make_provider()
+        assert provider.get_status() == TerminalStatus.WAITING_USER_ANSWER
+
+    @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
+    def test_stale_permission_prompt_with_idle_after(self, mock_tmux):
+        """Permission prompt followed by idle prompt -> not WAITING_USER_ANSWER."""
+        mock_tmux.get_history.return_value = (
+            "⏺ Running build...\n"
+            "Would you like to run the following command?\n"
+            "Reason: build outside sandbox\n"
+            "⏺ Build completed successfully.\n"
+            "❯ \n"
+        )
+        provider = self._make_provider()
+        # Stale permission prompt — should be COMPLETED (response + idle prompt)
+        assert provider.get_status() == TerminalStatus.COMPLETED
+
+    @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
+    def test_newer_permission_prompt_detected_after_stale_different_pattern(self, mock_tmux):
+        """Stale prompt of pattern A + active prompt of pattern B -> WAITING_USER_ANSWER.
+
+        Regression test: ensures the latest match across all patterns is used,
+        not just the first matched pattern.
+        """
+        mock_tmux.get_history.return_value = (
+            "Would you like to run the following command?\n"  # pattern A (stale)
+            "Reason: earlier command\n"
+            "❯ \n"  # idle prompt after pattern A -> stale
+            "⏺ Now running another task.\n"
+            "Allow the build tool to run this\n"  # pattern C (active, appears later)
+        )
+        provider = self._make_provider()
+        assert provider.get_status() == TerminalStatus.WAITING_USER_ANSWER
+
+    @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
+    def test_permission_prompt_with_spinner_is_processing(self, mock_tmux):
+        """Permission prompt text in scrollback + active spinner -> PROCESSING."""
+        mock_tmux.get_history.return_value = (
+            "Would you like to run the following command?\n"
+            "Reason: build\n"
+            "✽ Cooking… (3s · ↓ 50 tokens · thinking)\n"
+        )
+        provider = self._make_provider()
+        assert provider.get_status() == TerminalStatus.PROCESSING
+
     @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
     def test_real_claude_code_v2_startup_output(self, mock_tmux):
         """Realistic Claude Code v2.x startup output -> IDLE."""
