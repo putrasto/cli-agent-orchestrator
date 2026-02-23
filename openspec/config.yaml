@@ -1,20 +1,38 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Project: CLI Agent Orchestrator (Python, uv, pytest).
+  Main orchestrator implementation lives in examples/agnostic-3agents/run_orchestrator_loop.py.
+  System behavior is spec-driven via openspec/specs/*.md and change deltas under openspec/changes/*.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  Key conventions:
+  - Config precedence: env vars > JSON config > defaults.
+  - JSON config uses strict top-level validation (VALID_TOP_LEVEL_KEYS).
+  - Response handoff is file-based with archival under WD/.tmp/<run-timestamp>/.
+  - Retry flow after tester FAIL is shortened (programmer -> peer_programmer -> tester).
+  - Optional features (post-processing, permission auto-accept, notifications) must be opt-in or explicitly documented.
+
+rules:
+  proposal:
+    - Fill both New Capabilities and Modified Capabilities; do not leave modified capabilities empty when existing behavior changes.
+    - For any new config key, explicitly include env var name, JSON dotted path, default value, and where validation/mapping must be updated.
+    - In Impact, include code files, tests, and any base spec files that must be updated (for example openspec/specs/json-config/spec.md).
+    - Describe safety and failure-mode behavior for autonomous actions (timeouts, auto-accept, notifications, retries).
+
+  design:
+    - Every decision should map to an implementation task and at least one test.
+    - Specify exact event triggers, throttling/rate-limit behavior, and reset boundaries (per poll, per turn, per run) where applicable.
+    - Require fire-and-forget behavior for observability features (logging/notifications) so failures do not block orchestration.
+    - Call out alternatives considered for networking/dependencies and why the selected approach fits this repo.
+
+  tasks:
+    - Tasks must reference concrete files and functions, not only high-level intent.
+    - Include at least one negative-path/regression test task for each new behavior family.
+    - Include config pipeline tasks when adding config keys: _CONFIG_KEYS, _apply_config, and top-level validation if needed.
+    - Verification tasks must include targeted pytest commands for touched areas before any broad test run.
+
+  specs:
+    - Use normative requirement language (SHALL) with explicit scenarios.
+    - Add scenarios for both happy path and guardrail behavior (disabled mode, failure path, stale/duplicate event suppression).
+    - For config requirements, always specify env var, JSON path, and validation expectations.
+    - For event-driven behavior, specify exact trigger source and dedup/rate-limit semantics to make tests deterministic.

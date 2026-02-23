@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +32,7 @@ VALID_TOP_LEVEL_KEYS = frozenset({
     "api", "provider", "wd", "prompt", "prompt_file", "project_test_cmd",
     "agents", "limits", "condensation", "handoff", "post_processing",
     "cleanup_on_exit", "resume", "state_file", "start_agent",
+    "notifications",
 })
 VALID_AGENT_ROLES = frozenset({
     "analyst", "peer_analyst", "programmer", "peer_programmer", "tester",
@@ -73,6 +75,7 @@ _CONFIG_KEYS: list[tuple[str, str, object, type]] = [
     ("handoff.max_file_reminders",                 "MAX_FILE_REMINDERS",                 1,                      int),
     ("handoff.auto_accept_permissions",            "AUTO_ACCEPT_PERMISSIONS",            False,                  bool),
     ("start_agent",                                "START_AGENT",                        "analyst",              str),
+    ("notifications.ntfy_topic",                    "NTFY_TOPIC",                         "",                     str),
     ("post_processing.openspec_archive",           "POST_OPENSPEC_ARCHIVE",              False,                  bool),
     ("post_processing.git_commit",                 "POST_GIT_COMMIT",                    False,                  bool),
     ("post_processing.git_commit_comment",          "POST_GIT_COMMIT_COMMENT",            "",                     str),
@@ -219,6 +222,7 @@ def _apply_config(cfg: dict) -> None:
     global RESPONSE_TIMEOUT, IDLE_GRACE_SECONDS, STRICT_FILE_HANDOFF, MAX_FILE_REMINDERS
     global AUTO_ACCEPT_PERMISSIONS
     global RESPONSE_DIR, AGENT_CONFIG, START_AGENT
+    global NTFY_TOPIC
     global POST_OPENSPEC_ARCHIVE, POST_GIT_COMMIT, POST_GIT_COMMIT_COMMENT
 
     API = cfg["API"]
@@ -251,6 +255,7 @@ def _apply_config(cfg: dict) -> None:
     RESPONSE_DIR = Path(WD) / ".tmp" / "agent-responses"
     AGENT_CONFIG = cfg["_agent_config"]
     START_AGENT = cfg["START_AGENT"]
+    NTFY_TOPIC = cfg["NTFY_TOPIC"]
     POST_OPENSPEC_ARCHIVE = cfg["POST_OPENSPEC_ARCHIVE"]
     POST_GIT_COMMIT = cfg["POST_GIT_COMMIT"]
     POST_GIT_COMMIT_COMMENT = cfg["POST_GIT_COMMIT_COMMENT"]
@@ -302,6 +307,22 @@ TEST_RESULT_RE = re.compile(r"^\s*RESULT:\s*(PASS|FAIL)\b", re.MULTILINE | re.IG
 def log(msg: str) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
+
+
+def notify(title: str, message: str, priority: int = 3) -> None:
+    """Send a push notification via ntfy.sh. No-op when NTFY_TOPIC is empty."""
+    if not NTFY_TOPIC:
+        return
+    try:
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=message.encode("utf-8"),
+            headers={"Title": title, "Priority": str(priority)},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as exc:
+        log(f"ntfy notification failed: {exc}")
 
 
 # ── 4. API Client ──────────────────────────────────────────────────────────
@@ -437,6 +458,7 @@ PERMISSION_ACCEPT_COOLDOWN = 5.0  # seconds between auto-accepts per terminal
 MAX_PERMISSION_ACCEPTS_PER_TURN = 20  # safety cap per agent turn
 _last_permission_accept: dict[str, float] = {}  # terminal_id -> last accept timestamp
 _permission_accept_count: dict[str, int] = {}  # terminal_id -> count this turn
+_stuck_notified: set[str] = set()  # roles notified this turn (reset in send_and_wait)
 
 
 def wait_for_response_file(
@@ -509,6 +531,11 @@ def wait_for_response_file(
             else:
                 log(f"[{role}] Permission prompt detected on terminal {terminal_id} "
                     f"but AUTO_ACCEPT_PERMISSIONS is off — agent is blocked")
+                if role not in _stuck_notified:
+                    _stuck_notified.add(role)
+                    notify("Agent needs attention",
+                           f"{role} is stuck on a permission prompt (terminal {terminal_id})",
+                           priority=5)
 
         if p.exists() and status in ("idle", "completed"):
             content = p.read_text(encoding="utf-8").strip()
@@ -612,10 +639,19 @@ def _wait_for_settle(terminal_id: str, timeout: float = 10.0) -> None:
 def send_and_wait(terminal_id: str, role: str, message: str) -> str:
     """Clear stale file, send prompt, wait for response file."""
     _permission_accept_count[terminal_id] = 0  # Reset per-turn safety cap
+    _stuck_notified.discard(role)  # Reset stuck-agent notification for this role
     clear_stale_response(role)
     _wait_for_settle(terminal_id)
     api.send_input(terminal_id, message)
-    return wait_for_response_file(role, terminal_id)
+    try:
+        return wait_for_response_file(role, terminal_id)
+    except RuntimeError as exc:
+        if "entered ERROR state" in str(exc):
+            notify("Pipeline error", str(exc), priority=4)
+        raise
+    except TimeoutError as exc:
+        notify("Pipeline error", str(exc), priority=4)
+        raise
 
 
 # ── 6. Review / approval logic ─────────────────────────────────────────────
@@ -1695,6 +1731,7 @@ def main() -> None:
                 save_state()
                 print()
                 log("FINAL: PASS")
+                notify("Pipeline PASS", f"Completed in round {rnd}")
                 run_post_processing(WD)
                 cleanup(_save=False)
                 sys.exit(0)
@@ -1710,6 +1747,7 @@ def main() -> None:
     final_status = "FAIL"
     save_state()
     log(f"Reached MAX_ROUNDS={MAX_ROUNDS} without PASS")
+    notify("Pipeline FAIL", f"Exhausted {MAX_ROUNDS} rounds without PASS", priority=4)
     cleanup(_save=False)
     sys.exit(1)
 

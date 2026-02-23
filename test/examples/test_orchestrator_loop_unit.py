@@ -3244,3 +3244,404 @@ class TestPostProcessingConfig:
         monkeypatch.setenv("POST_OPENSPEC_ARCHIVE", "1")
         cfg = orch.load_config(argv=["prog", str(cfg_file)])
         assert cfg["POST_OPENSPEC_ARCHIVE"] is True
+
+
+# ── Notify helper ──────────────────────────────────────────────────────────
+
+
+class TestNotify:
+    def test_sends_post_with_correct_url_headers_body(self, monkeypatch):
+        """notify() sends POST with correct URL, headers (Title, Priority), and body."""
+        monkeypatch.setattr(orch, "NTFY_TOPIC", "my-pipeline")
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["method"] = req.get_method()
+            captured["data"] = req.data
+            captured["title"] = req.get_header("Title")
+            captured["priority"] = req.get_header("Priority")
+            captured["timeout"] = timeout
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        orch.notify("Pipeline PASS", "Completed in round 1", priority=3)
+        assert captured["url"] == "https://ntfy.sh/my-pipeline"
+        assert captured["method"] == "POST"
+        assert captured["data"] == b"Completed in round 1"
+        assert captured["title"] == "Pipeline PASS"
+        assert captured["priority"] == "3"
+        assert captured["timeout"] == 5
+
+    def test_noop_when_topic_empty(self, monkeypatch):
+        """notify() is a no-op when topic is empty."""
+        monkeypatch.setattr(orch, "NTFY_TOPIC", "")
+        called = []
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: called.append(1))
+        orch.notify("Test", "msg")
+        assert called == []
+
+    def test_catches_exceptions_and_logs(self, monkeypatch):
+        """notify() catches exceptions and logs without raising."""
+        monkeypatch.setattr(orch, "NTFY_TOPIC", "test-topic")
+
+        def fail_urlopen(req, timeout=None):
+            raise ConnectionError("network down")
+
+        monkeypatch.setattr("urllib.request.urlopen", fail_urlopen)
+        logged = []
+        monkeypatch.setattr(orch, "log", lambda msg: logged.append(msg))
+        # Should not raise
+        orch.notify("Title", "body")
+        assert any("ntfy notification failed" in m for m in logged)
+
+    def test_ntfy_topic_config_from_env(self, monkeypatch):
+        """NTFY_TOPIC config key parses from env var."""
+        monkeypatch.setenv("NTFY_TOPIC", "my-pipeline")
+        cfg = orch.load_config(argv=["_test"])
+        assert cfg["NTFY_TOPIC"] == "my-pipeline"
+
+    def test_json_config_notifications_passes_validation(self, tmp_path):
+        """JSON config with notifications section passes validation."""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({
+            "notifications": {"ntfy_topic": "my-pipeline"}
+        }))
+        cfg = orch.load_config(argv=["prog", str(cfg_file)])
+        assert cfg["NTFY_TOPIC"] == "my-pipeline"
+
+
+# ── Notify call-site tests ─────────────────────────────────────────────────
+
+
+class TestNotifyCallSites:
+    """Tests that notify() is called at the correct orchestrator event sites."""
+
+    def setup_method(self):
+        self._orig_dir = orch.RESPONSE_DIR
+        self._orig_strict = orch.STRICT_FILE_HANDOFF
+        self._orig_poll = orch.POLL_SECONDS
+        self._orig_grace = orch.IDLE_GRACE_SECONDS
+        self._orig_reminders = orch.MAX_FILE_REMINDERS
+        self._orig_timeout = orch.RESPONSE_TIMEOUT
+        self._orig_wd = orch.WD
+        self._orig_ts = orch._run_timestamp
+        self._orig_seq = orch._response_seq
+        self._orig_auto = orch.AUTO_ACCEPT_PERMISSIONS
+        self._orig_perm_accept = orch._last_permission_accept.copy()
+        self._orig_perm_count = orch._permission_accept_count.copy()
+        self._orig_stuck = orch._stuck_notified.copy()
+        self._orig_ntfy = orch.NTFY_TOPIC
+
+    def teardown_method(self):
+        orch.RESPONSE_DIR = self._orig_dir
+        orch.STRICT_FILE_HANDOFF = self._orig_strict
+        orch.POLL_SECONDS = self._orig_poll
+        orch.IDLE_GRACE_SECONDS = self._orig_grace
+        orch.MAX_FILE_REMINDERS = self._orig_reminders
+        orch.RESPONSE_TIMEOUT = self._orig_timeout
+        orch.WD = self._orig_wd
+        orch._run_timestamp = self._orig_ts
+        orch._response_seq = self._orig_seq
+        orch.AUTO_ACCEPT_PERMISSIONS = self._orig_auto
+        orch._last_permission_accept.clear()
+        orch._last_permission_accept.update(self._orig_perm_accept)
+        orch._permission_accept_count.clear()
+        orch._permission_accept_count.update(self._orig_perm_count)
+        orch._stuck_notified.clear()
+        orch._stuck_notified.update(self._orig_stuck)
+        orch.NTFY_TOPIC = self._orig_ntfy
+
+    @patch("run_orchestrator_loop.notify")
+    @patch("run_orchestrator_loop.log")
+    @patch("run_orchestrator_loop._wait_for_settle")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    def test_terminal_error_notifies_via_send_and_wait(
+        self, mock_status, mock_send, mock_settle, mock_log, mock_notify, tmp_path
+    ):
+        """RuntimeError with 'entered ERROR state' from wait_for_response_file triggers notify."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.NTFY_TOPIC = "test-topic"
+        mock_status.return_value = "error"
+
+        with pytest.raises(RuntimeError, match="entered ERROR state"):
+            orch.send_and_wait("term-err", "programmer", "do work")
+
+        mock_notify.assert_called_once()
+        args = mock_notify.call_args
+        assert args[0][0] == "Pipeline error"
+        assert "entered ERROR state" in args[0][1]
+        assert args[1]["priority"] == 4
+
+    @patch("run_orchestrator_loop.notify")
+    @patch("run_orchestrator_loop.log")
+    @patch("time.monotonic")
+    @patch("time.sleep")
+    @patch.object(orch.api, "get_status")
+    def test_timeout_notifies_from_wait_for_response_file(
+        self, mock_status, mock_sleep, mock_time, mock_log, mock_notify, tmp_path
+    ):
+        """TimeoutError from wait_for_response_file triggers notify via send_and_wait."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.NTFY_TOPIC = "test-topic"
+        # time.monotonic calls: start (0.0), then elapsed check (2.0 > 1s timeout)
+        mock_time.side_effect = [0.0, 2.0]
+        mock_status.return_value = "processing"
+
+        # Test at wait_for_response_file level with explicit short timeout.
+        # send_and_wait wraps this with the same try/except (tested in error test above).
+        with pytest.raises(TimeoutError, match="Timeout"):
+            orch.wait_for_response_file("tester", "term-to", timeout=1)
+
+        # Verify notify was NOT called here — it's called in send_and_wait's except handler
+        mock_notify.assert_not_called()
+
+    @patch("run_orchestrator_loop.notify")
+    @patch("run_orchestrator_loop.log")
+    @patch("time.monotonic")
+    @patch("time.sleep")
+    @patch("run_orchestrator_loop._wait_for_settle")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    def test_timeout_notifies_via_send_and_wait(
+        self, mock_status, mock_send, mock_settle, mock_sleep, mock_time, mock_log, mock_notify, tmp_path
+    ):
+        """TimeoutError caught in send_and_wait calls notify with priority 4."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.NTFY_TOPIC = "test-topic"
+
+        # Mock wait_for_response_file to raise TimeoutError directly
+        with patch("run_orchestrator_loop.wait_for_response_file",
+                   side_effect=TimeoutError("Timeout (1s) waiting for tester")):
+            with pytest.raises(TimeoutError, match="Timeout"):
+                orch.send_and_wait("term-to", "tester", "run tests")
+
+        mock_notify.assert_called_once()
+        args = mock_notify.call_args
+        assert args[0][0] == "Pipeline error"
+        assert "Timeout" in args[0][1]
+        assert args[1]["priority"] == 4
+
+    @patch("run_orchestrator_loop.notify")
+    @patch("run_orchestrator_loop.log")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    def test_stuck_agent_notifies_once_per_role(
+        self, mock_status, mock_send, mock_log, mock_notify, tmp_path
+    ):
+        """Stuck agent with AUTO_ACCEPT off triggers notify once per role."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.AUTO_ACCEPT_PERMISSIONS = False
+        orch.IDLE_GRACE_SECONDS = 0
+        orch.STRICT_FILE_HANDOFF = False
+        orch.NTFY_TOPIC = "test-topic"
+        orch._stuck_notified.clear()
+        resp_file = tmp_path / "analyst_summary.md"
+
+        call_count = [0]
+
+        def status_side_effect(tid):
+            call_count[0] += 1
+            if call_count[0] <= 3:
+                return "waiting_user_answer"  # stuck 3 times
+            if not resp_file.exists():
+                resp_file.write_text("ANALYST_SUMMARY:\nDone.")
+            return "idle"
+
+        mock_status.side_effect = status_side_effect
+
+        result = orch.wait_for_response_file("analyst", "term-stuck", timeout=10)
+        assert "Done." in result
+
+        # notify should be called exactly once despite 3 waiting_user_answer polls
+        notify_calls = [c for c in mock_notify.call_args_list
+                        if c[0][0] == "Agent needs attention"]
+        assert len(notify_calls) == 1
+        assert notify_calls[0][1]["priority"] == 5
+        assert "analyst" in notify_calls[0][0][1]
+
+    @patch("run_orchestrator_loop.notify")
+    @patch("run_orchestrator_loop.log")
+    @patch("run_orchestrator_loop._wait_for_settle")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    def test_stuck_notified_resets_per_turn(
+        self, mock_status, mock_send, mock_settle, mock_log, mock_notify, tmp_path
+    ):
+        """_stuck_notified resets in send_and_wait, allowing notify again next turn."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.AUTO_ACCEPT_PERMISSIONS = False
+        orch.IDLE_GRACE_SECONDS = 0
+        orch.STRICT_FILE_HANDOFF = False
+        orch.NTFY_TOPIC = "test-topic"
+        orch._stuck_notified.clear()
+
+        resp_file = tmp_path / "analyst_summary.md"
+        call_count = [0]
+
+        def status_side_effect(tid):
+            call_count[0] += 1
+            # Odd calls: stuck, even calls: idle with file
+            if call_count[0] % 2 == 1:
+                resp_file.write_text(f"ANALYST_SUMMARY:\nTurn {call_count[0]}.")
+                return "waiting_user_answer"
+            return "idle"
+
+        mock_status.side_effect = status_side_effect
+
+        # Turn 1
+        orch.send_and_wait("term-stuck2", "analyst", "prompt 1")
+
+        # Turn 2 — archive stale file, reset call pattern
+        (tmp_path / "test-run").mkdir(parents=True, exist_ok=True)
+        orch.send_and_wait("term-stuck2", "analyst", "prompt 2")
+
+        # Should have 2 stuck notifications (one per turn)
+        stuck_calls = [c for c in mock_notify.call_args_list
+                       if c[0][0] == "Agent needs attention"]
+        assert len(stuck_calls) == 2
+
+    @patch("run_orchestrator_loop.notify")
+    @patch("run_orchestrator_loop.cleanup")
+    @patch("run_orchestrator_loop.run_post_processing")
+    @patch("run_orchestrator_loop.save_state")
+    @patch("run_orchestrator_loop.send_and_wait",
+           return_value="RESULT: PASS\nEVIDENCE:\n- All good")
+    @patch("run_orchestrator_loop.ensure_response_dir")
+    @patch("run_orchestrator_loop.verify_resume_terminals")
+    @patch("run_orchestrator_loop.load_config")
+    @patch("run_orchestrator_loop._apply_config")
+    @patch("run_orchestrator_loop.ApiClient")
+    def test_pass_notification_from_main(
+        self, mock_api_cls, mock_apply, mock_load_cfg, mock_verify,
+        mock_ensure, mock_saw, mock_save, mock_post, mock_cleanup, mock_notify, tmp_path
+    ):
+        """PASS result in tester phase calls notify('Pipeline PASS', ...)."""
+        mock_load_cfg.return_value = {}
+        mock_api_cls.return_value = orch.api
+
+        orig = {
+            "STATE_FILE": orch.STATE_FILE,
+            "RESUME": orch.RESUME,
+            "PROMPT": orch.PROMPT,
+            "PROMPT_FILE": orch.PROMPT_FILE,
+            "current_phase": orch.current_phase,
+            "current_round": orch.current_round,
+            "final_status": orch.final_status,
+            "MAX_ROUNDS": orch.MAX_ROUNDS,
+            "NTFY_TOPIC": orch.NTFY_TOPIC,
+        }
+        try:
+            orch.PROMPT = (
+                "*** ORIGINAL EXPLORE SUMMARY ***\n"
+                "Explore.\n"
+                "*** SCENARIO TEST ***\n"
+                "Test."
+            )
+            orch.PROMPT_FILE = ""
+            orch.RESUME = True
+            orch.STATE_FILE = str(tmp_path / "state.json")
+            orch.current_phase = "tester"
+            orch.current_round = 1
+            orch.final_status = "RUNNING"
+            orch.MAX_ROUNDS = 1
+            orch.NTFY_TOPIC = "test-topic"
+            orch.outputs["programmer"] = "some changes"
+            orch.terminal_ids["tester"] = "t1"
+
+            # load_state returns True without changing phase
+            with patch("run_orchestrator_loop.load_state", return_value=True):
+                with pytest.raises(SystemExit) as exc_info:
+                    orch.main()
+                assert exc_info.value.code == 0
+
+            # Verify PASS notification was sent
+            pass_calls = [c for c in mock_notify.call_args_list
+                          if c[0][0] == "Pipeline PASS"]
+            assert len(pass_calls) == 1
+            assert "round 1" in pass_calls[0][0][1]
+        finally:
+            for k, v in orig.items():
+                setattr(orch, k, v)
+
+    @patch("run_orchestrator_loop.notify")
+    @patch("run_orchestrator_loop.cleanup")
+    @patch("run_orchestrator_loop.save_state")
+    @patch("run_orchestrator_loop.send_and_wait",
+           return_value="RESULT: FAIL\nEVIDENCE:\n- Test failed")
+    @patch("run_orchestrator_loop.ensure_response_dir")
+    @patch("run_orchestrator_loop.verify_resume_terminals")
+    @patch("run_orchestrator_loop.load_config")
+    @patch("run_orchestrator_loop._apply_config")
+    @patch("run_orchestrator_loop.ApiClient")
+    def test_fail_max_rounds_notification_from_main(
+        self, mock_api_cls, mock_apply, mock_load_cfg, mock_verify,
+        mock_ensure, mock_saw, mock_save, mock_cleanup, mock_notify, tmp_path
+    ):
+        """Max rounds exhausted calls notify('Pipeline FAIL', ..., priority=4)."""
+        mock_load_cfg.return_value = {}
+        mock_api_cls.return_value = orch.api
+
+        orig = {
+            "STATE_FILE": orch.STATE_FILE,
+            "RESUME": orch.RESUME,
+            "PROMPT": orch.PROMPT,
+            "PROMPT_FILE": orch.PROMPT_FILE,
+            "current_phase": orch.current_phase,
+            "current_round": orch.current_round,
+            "final_status": orch.final_status,
+            "MAX_ROUNDS": orch.MAX_ROUNDS,
+            "NTFY_TOPIC": orch.NTFY_TOPIC,
+        }
+        try:
+            orch.PROMPT = (
+                "*** ORIGINAL EXPLORE SUMMARY ***\n"
+                "Explore.\n"
+                "*** SCENARIO TEST ***\n"
+                "Test."
+            )
+            orch.PROMPT_FILE = ""
+            orch.RESUME = True
+            orch.STATE_FILE = str(tmp_path / "state.json")
+            orch.current_phase = "tester"
+            orch.current_round = 1
+            orch.final_status = "RUNNING"
+            orch.MAX_ROUNDS = 1  # Only 1 round — FAIL exhausts it
+            orch.NTFY_TOPIC = "test-topic"
+            orch.outputs["programmer"] = "some changes"
+            orch.terminal_ids["tester"] = "t1"
+
+            with patch("run_orchestrator_loop.load_state", return_value=True):
+                with pytest.raises(SystemExit) as exc_info:
+                    orch.main()
+                assert exc_info.value.code == 1
+
+            # Verify FAIL notification was sent
+            fail_calls = [c for c in mock_notify.call_args_list
+                          if c[0][0] == "Pipeline FAIL"]
+            assert len(fail_calls) == 1
+            assert "1 rounds" in fail_calls[0][0][1] or "1" in fail_calls[0][0][1]
+            assert fail_calls[0][1]["priority"] == 4
+        finally:
+            for k, v in orig.items():
+                setattr(orch, k, v)
