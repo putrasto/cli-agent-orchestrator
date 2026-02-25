@@ -1474,6 +1474,114 @@ class TestPermissionAutoAccept:
         log_messages = [str(c) for c in mock_log.call_args_list]
         assert any("AUTO_ACCEPT_PERMISSIONS is off" in msg for msg in log_messages)
 
+    @patch.object(
+        orch.api,
+        "get_last_output",
+        return_value=(
+            "API Error: 500\n"
+            '{"type":"error","error":{"type":"api_error","message":"Internal server error"},'
+            '"request_id":"req_011CYV8Zw3nt9BGc186wH3ha"}\n'
+        ),
+    )
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status", return_value="waiting_user_answer")
+    def test_claude_api_500_never_auto_accepts_and_raises(
+        self, mock_status, mock_send, mock_last_out, tmp_path
+    ):
+        """Claude API 500 while waiting_user_answer requires manual intervention."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.AUTO_ACCEPT_PERMISSIONS = True
+
+        with pytest.raises(RuntimeError, match="Claude API Error: 500"):
+            orch.wait_for_response_file("analyst", "term-001", timeout=10)
+
+        mock_send.assert_not_called()
+
+    @patch.object(
+        orch.api,
+        "get_last_output",
+        return_value=(
+            "API Error: 500\n"
+            '{"type":"error","error":{"type":"api_error","message":"Internal server error"},'
+            '"request_id":"req_011CYV8Zw3nt9BGc186wH3ha"}\n'
+        ),
+    )
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status", return_value="waiting_user_answer")
+    def test_claude_api_500_raises_even_when_auto_accept_off(
+        self, mock_status, mock_send, mock_last_out, tmp_path
+    ):
+        """Claude API 500 should fail fast regardless of AUTO_ACCEPT_PERMISSIONS."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.AUTO_ACCEPT_PERMISSIONS = False
+
+        with pytest.raises(RuntimeError, match="Claude API Error: 500"):
+            orch.wait_for_response_file("analyst", "term-001", timeout=10)
+
+        mock_send.assert_not_called()
+
+    @patch.object(
+        orch.api,
+        "get_last_output",
+        return_value=(
+            "API Error: 500\n"
+            '{"type":"error","error":{"type":"api_error","message":"Internal server error"},'
+            '"request_id":"req_011CYV8Zw3nt9BGc186wH3ha"}\n'
+        ),
+    )
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status", side_effect=["processing", "idle"])
+    def test_claude_api_500_in_idle_state_raises(
+        self, mock_status, mock_send, mock_last_out, tmp_path
+    ):
+        """processing -> idle with Claude API 500 output raises immediately."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.AUTO_ACCEPT_PERMISSIONS = True
+
+        with pytest.raises(RuntimeError, match="Claude API Error: 500"):
+            orch.wait_for_response_file("analyst", "term-001", timeout=10)
+
+        mock_send.assert_not_called()
+
+    @patch.object(
+        orch.api,
+        "get_last_output",
+        return_value=(
+            "API Error: 500\n"
+            '{"type":"error","error":{"type":"api_error","message":"Internal server error"},'
+            '"request_id":"req_011CYV8Zw3nt9BGc186wH3ha"}\n'
+        ),
+    )
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status", side_effect=["processing", "completed"])
+    def test_claude_api_500_in_completed_state_raises(
+        self, mock_status, mock_send, mock_last_out, tmp_path
+    ):
+        """processing -> completed with Claude API 500 output raises immediately."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.AUTO_ACCEPT_PERMISSIONS = False
+
+        with pytest.raises(RuntimeError, match="Claude API Error: 500"):
+            orch.wait_for_response_file("analyst", "term-001", timeout=10)
+
+        mock_send.assert_not_called()
+
     @patch("run_orchestrator_loop.log")
     @patch.object(orch.api, "get_last_output", return_value="permission prompt...")
     @patch.object(orch.api, "send_input")

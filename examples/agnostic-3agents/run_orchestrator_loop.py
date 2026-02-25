@@ -459,6 +459,23 @@ MAX_PERMISSION_ACCEPTS_PER_TURN = 20  # safety cap per agent turn
 _last_permission_accept: dict[str, float] = {}  # terminal_id -> last accept timestamp
 _permission_accept_count: dict[str, int] = {}  # terminal_id -> count this turn
 _stuck_notified: set[str] = set()  # roles notified this turn (reset in send_and_wait)
+CLAUDE_API_500_RE = re.compile(r"API Error:\s*500", re.IGNORECASE)
+CLAUDE_API_ERROR_JSON_TYPE_RE = re.compile(r'"type"\s*:\s*"api_error"', re.IGNORECASE)
+CLAUDE_API_ERROR_JSON_MSG_RE = re.compile(
+    r'"message"\s*:\s*"Internal server error"', re.IGNORECASE
+)
+
+
+def is_claude_api_500_error(output: str) -> bool:
+    """Detect Claude CLI internal API 500 errors from terminal output."""
+    if not output:
+        return False
+    if CLAUDE_API_500_RE.search(output):
+        return True
+    return bool(
+        CLAUDE_API_ERROR_JSON_TYPE_RE.search(output)
+        and CLAUDE_API_ERROR_JSON_MSG_RE.search(output)
+    )
 
 
 def wait_for_response_file(
@@ -492,16 +509,40 @@ def wait_for_response_file(
     guard_since = start  # Reset on reminder to avoid immediate startup timeout
     idle_since: float | None = None
     agent_started = False  # True once agent has demonstrably started processing
+    idle_output_snapshot: str | None = None
     reminders_sent = 0
 
     while True:
         status = api.get_status(terminal_id)
 
         if status == "error":
+            try:
+                last_output = api.get_last_output(terminal_id)
+            except Exception:
+                last_output = ""
+            if is_claude_api_500_error(last_output):
+                raise RuntimeError(
+                    f"[{role}] Terminal {terminal_id} entered ERROR state: "
+                    "Claude API Error: 500 (manual intervention required; "
+                    "pipeline will not continue to next stage)"
+                )
             raise RuntimeError(f"Terminal {terminal_id} entered ERROR state")
 
         # Handle permission prompts (waiting_user_answer)
         if status == "waiting_user_answer":
+            try:
+                waiting_output = api.get_last_output(terminal_id)
+            except Exception:
+                waiting_output = ""
+
+            if is_claude_api_500_error(waiting_output):
+                raise RuntimeError(
+                    f"[{role}] Terminal {terminal_id} entered ERROR state: "
+                    "Claude API Error: 500 while awaiting user answer "
+                    "(manual intervention required; pipeline will not continue "
+                    "to next stage)"
+                )
+
             if AUTO_ACCEPT_PERMISSIONS:
                 now = time.monotonic()
                 last_accept = _last_permission_accept.get(terminal_id, 0.0)
@@ -516,11 +557,11 @@ def wait_for_response_file(
                     _permission_accept_count[terminal_id] = accept_count + 1
                     count = _permission_accept_count[terminal_id]
                     # Audit log with terminal snippet for traceability
-                    try:
-                        snippet = api.get_last_output(terminal_id)
+                    snippet = waiting_output
+                    if snippet:
                         snippet_lines = snippet.strip().split("\n")[-5:]
                         snippet_text = "\n  ".join(snippet_lines)
-                    except Exception:
+                    else:
                         snippet_text = "(unable to retrieve terminal output)"
                     log(f"[{role}] Permission prompt detected on {terminal_id}, "
                         f"auto-accepting ({count}/{MAX_PERMISSION_ACCEPTS_PER_TURN})"
@@ -534,7 +575,8 @@ def wait_for_response_file(
                 if role not in _stuck_notified:
                     _stuck_notified.add(role)
                     notify("Agent needs attention",
-                           f"{role} is stuck on a permission prompt (terminal {terminal_id})",
+                           f"{role} is stuck on a permission prompt "
+                           f"(session {session_name}, terminal {terminal_id})",
                            priority=5)
 
         if p.exists() and status in ("idle", "completed"):
@@ -548,6 +590,26 @@ def wait_for_response_file(
         # has begun processing (covers PROCESSING, WAITING_USER_ANSWER, etc.)
         if not agent_started and status not in ("idle", "completed"):
             agent_started = True
+
+        # Check for Claude API 500 errors when agent is idle/completed without
+        # response file — the error caused the agent to return to its prompt.
+        # Must halt the pipeline regardless of AUTO_ACCEPT_PERMISSIONS.
+        if (
+            agent_started
+            and status in ("idle", "completed")
+            and not p.exists()
+            and idle_since is None
+        ):
+            try:
+                idle_output_snapshot = api.get_last_output(terminal_id)
+            except Exception:
+                idle_output_snapshot = ""
+            if is_claude_api_500_error(idle_output_snapshot):
+                raise RuntimeError(
+                    f"[{role}] Terminal {terminal_id} entered ERROR state: "
+                    "Claude API Error: 500 (manual intervention required; "
+                    "pipeline will not continue to next stage)"
+                )
 
         # Track how long the terminal has been idle without a response file
         if status in ("idle", "completed") and not p.exists():
@@ -584,9 +646,12 @@ def wait_for_response_file(
                     log(f"[{role}] Agent finished but no response file after "
                         f"{IDLE_GRACE_SECONDS}s idle and {reminders_sent} reminder(s), "
                         f"falling back to get_last_output()")
+                    if idle_output_snapshot is not None:
+                        return idle_output_snapshot
                     return api.get_last_output(terminal_id)
         else:
             idle_since = None  # Reset if terminal is processing or file appeared
+            idle_output_snapshot = None
 
         elapsed = time.monotonic() - start
         if elapsed > timeout:
@@ -598,6 +663,8 @@ def wait_for_response_file(
                     )
                 log(f"[{role}] Response file not found after {timeout}s, "
                     f"falling back to get_last_output()")
+                if idle_output_snapshot is not None:
+                    return idle_output_snapshot
                 return api.get_last_output(terminal_id)
             raise TimeoutError(
                 f"Timeout ({timeout}s) waiting for {role} response "
@@ -647,10 +714,10 @@ def send_and_wait(terminal_id: str, role: str, message: str) -> str:
         return wait_for_response_file(role, terminal_id)
     except RuntimeError as exc:
         if "entered ERROR state" in str(exc):
-            notify("Pipeline error", str(exc), priority=4)
+            notify("Pipeline error", f"[{session_name}] {exc}", priority=4)
         raise
     except TimeoutError as exc:
-        notify("Pipeline error", str(exc), priority=4)
+        notify("Pipeline error", f"[{session_name}] {exc}", priority=4)
         raise
 
 
@@ -1731,7 +1798,7 @@ def main() -> None:
                 save_state()
                 print()
                 log("FINAL: PASS")
-                notify("Pipeline PASS", f"Completed in round {rnd}")
+                notify("Pipeline PASS", f"[{session_name}] Completed in round {rnd}")
                 run_post_processing(WD)
                 cleanup(_save=False)
                 sys.exit(0)
@@ -1747,7 +1814,7 @@ def main() -> None:
     final_status = "FAIL"
     save_state()
     log(f"Reached MAX_ROUNDS={MAX_ROUNDS} without PASS")
-    notify("Pipeline FAIL", f"Exhausted {MAX_ROUNDS} rounds without PASS", priority=4)
+    notify("Pipeline FAIL", f"[{session_name}] Exhausted {MAX_ROUNDS} rounds without PASS", priority=4)
     cleanup(_save=False)
     sys.exit(1)
 
