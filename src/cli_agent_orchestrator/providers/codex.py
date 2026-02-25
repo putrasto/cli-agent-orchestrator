@@ -33,7 +33,7 @@ CONTEXT_FOOTER_PATTERN = r"^\s*.*\d+%\s+context left\s*$"
 
 PROCESSING_PATTERN = r"\b(thinking|working|running|executing|processing|analyzing)\b"
 ACTIVE_WORK_UI_PATTERN = r"(?:\(\d+s\s+•\s+esc to interrupt\)|\besc to interrupt\b|•\s+Exploring\b)"
-WAITING_PROMPT_PATTERN = r"^(?:Approve|Allow)\b.*\b(?:y/n|yes/no|yes|no)\b"
+WAITING_PROMPT_PATTERN = r"(?:^(?:Approve|Allow)\b.*\b(?:y/n|yes/no|yes|no)\b|^\s*›\s+\d+\.\s+Yes,\s+proceed\b)"
 ERROR_PATTERN = r"^(?:Error:|ERROR:|Traceback \(most recent call last\):|panic:)"
 
 

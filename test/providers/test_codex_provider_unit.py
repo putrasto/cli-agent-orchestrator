@@ -220,6 +220,22 @@ class TestCodexProviderStatusDetection:
         assert status == TerminalStatus.WAITING_USER_ANSWER
 
     @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_waiting_user_answer_v104_yes_proceed_prompt(self, mock_tmux):
+        mock_tmux.get_history.return_value = (
+            "You Fix the bug\n"
+            "• Reading file src/main.py\n"
+            "› 1. Yes, proceed (y)\n"
+            "  2. No, and tell Codex what to do differently (esc)\n"
+            "\n"
+            "  Press enter to confirm or esc to cancel\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.WAITING_USER_ANSWER
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
     def test_get_status_error_when_no_user_prefix(self, mock_tmux):
         mock_tmux.get_history.return_value = "Error: something failed\n"
 
