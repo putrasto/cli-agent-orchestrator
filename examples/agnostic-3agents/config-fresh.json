@@ -38,6 +38,10 @@
     "response_timeout": 1800
   },
 
+  "notifications": {
+    "ntfy_topic": ""
+  },
+
   "post_processing": {
     "openspec_archive": false,
     "git_commit": false
