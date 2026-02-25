@@ -35,7 +35,9 @@
   "handoff": {
     "strict_file_handoff": true,
     "idle_grace_seconds": 30,
-    "response_timeout": 1800
+    "response_timeout": 1800,
+    "max_file_reminders": 1,
+    "auto_accept_permissions": false
   },
 
   "notifications": {
@@ -44,7 +46,8 @@
 
   "post_processing": {
     "openspec_archive": false,
-    "git_commit": false
+    "git_commit": false,
+    "git_commit_comment": ""
   },
 
   "start_agent": "analyst",
