@@ -1272,7 +1272,9 @@ class TestFileReminder:
         result = orch.wait_for_response_file("analyst", "term-001", timeout=1800)
         assert result == "fallback content"
         mock_send.assert_called_once()
-        mock_last.assert_called_once_with("term-001")
+        # One output snapshot per idle cycle: initial idle + post-reminder idle.
+        assert mock_last.call_count == 2
+        mock_last.assert_called_with("term-001")
 
     @patch("run_orchestrator_loop.log")
     @patch.object(orch.api, "send_input")
@@ -1579,6 +1581,42 @@ class TestPermissionAutoAccept:
 
         with pytest.raises(RuntimeError, match="Claude API Error: 500"):
             orch.wait_for_response_file("analyst", "term-001", timeout=10)
+
+        mock_send.assert_not_called()
+
+    @patch.object(
+        orch.api,
+        "get_last_output",
+        return_value=(
+            "API Error: 500\n"
+            '{"type":"error","error":{"type":"api_error","message":"Internal server error"},'
+            '"request_id":"req_011CYV8Zw3nt9BGc186wH3ha"}\n'
+        ),
+    )
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status", side_effect=["idle", "idle"])
+    @patch("run_orchestrator_loop.time")
+    def test_claude_api_500_after_startup_timeout_in_idle_path_raises(
+        self, mock_time, mock_status, mock_send, mock_last_out, tmp_path
+    ):
+        """always-idle path should still detect Claude API 500 after startup timeout."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.IDLE_GRACE_SECONDS = 30
+
+        mock_time.monotonic.side_effect = [
+            0.0,   # start
+            31.0,  # poll1 startup_elapsed (>30, startup timeout trips)
+            31.0,  # poll1 idle_since set
+            31.0,  # poll1 elapsed
+        ]
+        mock_time.sleep = MagicMock()
+
+        with pytest.raises(RuntimeError, match="Claude API Error: 500"):
+            orch.wait_for_response_file("analyst", "term-001", timeout=1800)
 
         mock_send.assert_not_called()
 
@@ -3467,7 +3505,7 @@ class TestNotifyCallSites:
     def test_terminal_error_notifies_via_send_and_wait(
         self, mock_status, mock_send, mock_settle, mock_log, mock_notify, tmp_path
     ):
-        """RuntimeError with 'entered ERROR state' from wait_for_response_file triggers notify."""
+        """RuntimeError from wait_for_response_file triggers notify."""
         orch.RESPONSE_DIR = tmp_path
         orch.WD = str(tmp_path)
         orch._run_timestamp = "test-run"
@@ -3483,6 +3521,34 @@ class TestNotifyCallSites:
         args = mock_notify.call_args
         assert args[0][0] == "Pipeline error"
         assert "entered ERROR state" in args[0][1]
+        assert args[1]["priority"] == 4
+
+    @patch("run_orchestrator_loop.notify")
+    @patch("run_orchestrator_loop.log")
+    @patch("run_orchestrator_loop._wait_for_settle")
+    @patch.object(orch.api, "send_input")
+    def test_runtime_error_without_entered_error_state_still_notifies(
+        self, mock_send, mock_settle, mock_log, mock_notify, tmp_path
+    ):
+        """Strict handoff/runtime errors should also emit Pipeline error notifications."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.NTFY_TOPIC = "test-topic"
+
+        with patch(
+            "run_orchestrator_loop.wait_for_response_file",
+            side_effect=RuntimeError("strict file handoff failed"),
+        ):
+            with pytest.raises(RuntimeError, match="strict file handoff failed"):
+                orch.send_and_wait("term-err2", "programmer", "do work")
+
+        mock_notify.assert_called_once()
+        args = mock_notify.call_args
+        assert args[0][0] == "Pipeline error"
+        assert "strict file handoff failed" in args[0][1]
         assert args[1]["priority"] == 4
 
     @patch("run_orchestrator_loop.notify")

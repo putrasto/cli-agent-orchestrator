@@ -598,7 +598,7 @@ def wait_for_response_file(
             agent_started
             and status in ("idle", "completed")
             and not p.exists()
-            and idle_since is None
+            and idle_output_snapshot is None
         ):
             try:
                 idle_output_snapshot = api.get_last_output(terminal_id)
@@ -633,6 +633,7 @@ def wait_for_response_file(
                         f"sending reminder ({reminders_sent}/{MAX_FILE_REMINDERS})")
                     api.send_input(terminal_id, reminder)
                     idle_since = None  # Reset grace timer for next cycle
+                    idle_output_snapshot = None  # Re-sample output in next idle cycle
                     agent_started = False  # Re-arm startup guard for reminder
                     guard_since = time.monotonic()  # Fresh startup timeout window
                 elif STRICT_FILE_HANDOFF:
@@ -713,8 +714,7 @@ def send_and_wait(terminal_id: str, role: str, message: str) -> str:
     try:
         return wait_for_response_file(role, terminal_id)
     except RuntimeError as exc:
-        if "entered ERROR state" in str(exc):
-            notify("Pipeline error", f"[{session_name}] {exc}", priority=4)
+        notify("Pipeline error", f"[{session_name}] {exc}", priority=4)
         raise
     except TimeoutError as exc:
         notify("Pipeline error", f"[{session_name}] {exc}", priority=4)
