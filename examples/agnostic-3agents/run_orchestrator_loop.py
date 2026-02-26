@@ -617,10 +617,24 @@ def wait_for_response_file(
                 # Agent hasn't started yet — check startup timeout
                 startup_elapsed = time.monotonic() - guard_since
                 if startup_elapsed > IDLE_GRACE_SECONDS:
-                    log(f"[{role}] Warning: agent never entered processing state after "
-                        f"{IDLE_GRACE_SECONDS}s, enabling idle grace timer")
-                    agent_started = True
-                    idle_since = time.monotonic()
+                    if reminders_sent < MAX_FILE_REMINDERS:
+                        reminders_sent += 1
+                        reminder = _build_file_reminder(role)
+                        log(
+                            f"[{role}] Warning: agent never entered processing state after "
+                            f"{IDLE_GRACE_SECONDS}s, sending reminder immediately "
+                            f"({reminders_sent}/{MAX_FILE_REMINDERS})"
+                        )
+                        api.send_input(terminal_id, reminder)
+                        idle_since = None
+                        idle_output_snapshot = None
+                        agent_started = False  # Re-arm startup guard for reminder
+                        guard_since = time.monotonic()  # Fresh startup timeout window
+                    else:
+                        log(f"[{role}] Warning: agent never entered processing state after "
+                            f"{IDLE_GRACE_SECONDS}s, enabling idle grace timer")
+                        agent_started = True
+                        idle_since = time.monotonic()
                 # else: skip grace timer — agent hasn't started yet
             elif idle_since is None:
                 idle_since = time.monotonic()

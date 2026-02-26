@@ -990,6 +990,59 @@ class TestStartupGuard:
                          if "never entered processing state" in str(c)]
         assert len(warning_calls) == 1
 
+    @patch("run_orchestrator_loop.log")
+    @patch.object(orch.api, "send_input")
+    @patch.object(orch.api, "get_status")
+    @patch("run_orchestrator_loop.time")
+    def test_startup_guard_timeout_sends_reminder_immediately(
+        self, mock_time, mock_status, mock_send, mock_log, tmp_path
+    ):
+        """If startup guard times out and reminders remain, send reminder immediately."""
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.STRICT_FILE_HANDOFF = True
+        orch.IDLE_GRACE_SECONDS = 10
+        orch.MAX_FILE_REMINDERS = 1
+        resp_file = tmp_path / "analyst_summary.md"
+
+        call_count = [0]
+
+        def status_side_effect(tid):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "completed"  # stale idle/completed; startup guard timeout triggers reminder
+            if call_count[0] == 2:
+                return "processing"  # agent reacts to reminder
+            if not resp_file.exists():
+                resp_file.write_text("ANALYST_SUMMARY:\nAfter startup reminder.")
+            return "idle"
+
+        mock_status.side_effect = status_side_effect
+        mock_time.monotonic.side_effect = [
+            0.0,   # start (guard_since=start)
+            12.0,  # poll1 startup_elapsed (12 > 10) -> send reminder immediately
+            13.0,  # poll1 guard_since reset after reminder
+            13.0,  # poll1 elapsed check
+            20.0,  # poll2 elapsed check (processing)
+            # poll3 returns on file+idle before elapsed check
+        ]
+        mock_time.sleep = MagicMock()
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=1800)
+
+        assert "After startup reminder." in result
+        mock_send.assert_called_once()
+        assert mock_send.call_args[0][0] == "term-001"
+        assert "response file" in mock_send.call_args[0][1].lower()
+
+        startup_warning_calls = [
+            c for c in mock_log.call_args_list if "never entered processing state" in str(c)
+        ]
+        assert len(startup_warning_calls) == 1
+        assert "sending reminder immediately" in str(startup_warning_calls[0]).lower()
+
     @patch.object(orch.api, "get_status")
     def test_startup_guard_waiting_user_answer_counts_as_started(self, mock_status, tmp_path):
         """waiting_user_answer status should count as agent started."""
