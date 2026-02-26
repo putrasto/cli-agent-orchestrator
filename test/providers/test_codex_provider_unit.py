@@ -268,6 +268,25 @@ class TestCodexProviderStatusDetection:
         assert status == TerminalStatus.IDLE
 
     @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_idle_with_v105_statusline_footer(self, mock_tmux):
+        mock_tmux.get_history.return_value = (
+            "╭──────────────────────────────────────────────────╮\n"
+            "│ >_ OpenAI Codex (v0.105.0)                       │\n"
+            "╰──────────────────────────────────────────────────╯\n"
+            "\n"
+            "  Tip: Use /statusline to configure which items appear in the status line.\n"
+            "\n"
+            "› Explain this codebase\n"
+            "\n"
+            "  gpt-5.3-codex high · 100% left · ~/project/example\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.IDLE
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
     def test_get_status_idle_with_merged_prompt_shortcuts_and_footer(self, mock_tmux):
         # Some captures merge the prompt, shortcut hint, and context footer into one line.
         mock_tmux.get_history.return_value = (

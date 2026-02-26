@@ -29,7 +29,10 @@ IDLE_PROMPT_PATTERN_LOG = r"❯"
 # - v0.104+: "• ..." (assistant), "› ..." (user)
 ASSISTANT_PREFIX_PATTERN = r"^\s*(?:(?:assistant|codex|agent)\s*:|•\s+)"
 USER_PREFIX_PATTERN = r"^\s*(?:You\b|›[ \t]+\S)"
-CONTEXT_FOOTER_PATTERN = r"^\s*.*\d+%\s+context left\s*$"
+# Codex status line footer variants:
+# - v0.104: "100% context left"
+# - v0.105+: "gpt-5.3-codex high · 100% left · ~/path"
+CONTEXT_FOOTER_PATTERN = r"^\s*.*\d+%\s+(?:context\s+)?left\b.*$"
 
 PROCESSING_PATTERN = r"\b(thinking|working|running|executing|processing|analyzing)\b"
 ACTIVE_WORK_UI_PATTERN = r"(?:\(\d+s\s+•\s+esc to interrupt\)|\besc to interrupt\b|•\s+Exploring\b)"
