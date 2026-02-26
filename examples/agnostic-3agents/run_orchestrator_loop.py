@@ -510,6 +510,8 @@ def wait_for_response_file(
     idle_since: float | None = None
     agent_started = False  # True once agent has demonstrably started processing
     idle_output_snapshot: str | None = None
+    startup_idle_output_snapshot: str | None = None
+    output_change_logged = False
     reminders_sent = 0
 
     while True:
@@ -591,6 +593,36 @@ def wait_for_response_file(
         if not agent_started and status not in ("idle", "completed"):
             agent_started = True
 
+        current_idle_output: str | None = None
+        if status in ("idle", "completed") and not p.exists() and not agent_started:
+            try:
+                current_idle_output = api.get_last_output(terminal_id)
+            except Exception:
+                current_idle_output = ""
+
+            # Some providers/CLIs can briefly report idle/completed while the
+            # terminal is still streaming output. Treat output changes during the
+            # startup guard as activity so the guard/grace timer doesn't fire early.
+            if startup_idle_output_snapshot is None:
+                startup_idle_output_snapshot = current_idle_output
+            elif current_idle_output != startup_idle_output_snapshot:
+                if not output_change_logged:
+                    log(
+                        f"[{role}] Detected terminal output change while status={status}; "
+                        "treating agent as started"
+                    )
+                    output_change_logged = True
+                agent_started = True
+                idle_since = None
+                startup_idle_output_snapshot = current_idle_output
+                idle_output_snapshot = current_idle_output
+                if is_claude_api_500_error(idle_output_snapshot):
+                    raise RuntimeError(
+                        f"[{role}] Terminal {terminal_id} entered ERROR state: "
+                        "Claude API Error: 500 (manual intervention required; "
+                        "pipeline will not continue to next stage)"
+                    )
+
         # Check for Claude API 500 errors when agent is idle/completed without
         # response file — the error caused the agent to return to its prompt.
         # Must halt the pipeline regardless of AUTO_ACCEPT_PERMISSIONS.
@@ -600,10 +632,12 @@ def wait_for_response_file(
             and not p.exists()
             and idle_output_snapshot is None
         ):
-            try:
-                idle_output_snapshot = api.get_last_output(terminal_id)
-            except Exception:
-                idle_output_snapshot = ""
+            if current_idle_output is None:
+                try:
+                    current_idle_output = api.get_last_output(terminal_id)
+                except Exception:
+                    current_idle_output = ""
+            idle_output_snapshot = current_idle_output
             if is_claude_api_500_error(idle_output_snapshot):
                 raise RuntimeError(
                     f"[{role}] Terminal {terminal_id} entered ERROR state: "
@@ -617,6 +651,19 @@ def wait_for_response_file(
                 # Agent hasn't started yet — check startup timeout
                 startup_elapsed = time.monotonic() - guard_since
                 if startup_elapsed > IDLE_GRACE_SECONDS:
+                    # If the CLI surfaced a terminal-level API 500 but status
+                    # stayed idle/completed, fail immediately before reminders.
+                    if current_idle_output is None:
+                        try:
+                            current_idle_output = api.get_last_output(terminal_id)
+                        except Exception:
+                            current_idle_output = ""
+                    if is_claude_api_500_error(current_idle_output):
+                        raise RuntimeError(
+                            f"[{role}] Terminal {terminal_id} entered ERROR state: "
+                            "Claude API Error: 500 (manual intervention required; "
+                            "pipeline will not continue to next stage)"
+                        )
                     if reminders_sent < MAX_FILE_REMINDERS:
                         reminders_sent += 1
                         reminder = _build_file_reminder(role)
@@ -628,12 +675,15 @@ def wait_for_response_file(
                         api.send_input(terminal_id, reminder)
                         idle_since = None
                         idle_output_snapshot = None
+                        startup_idle_output_snapshot = None
                         agent_started = False  # Re-arm startup guard for reminder
+                        output_change_logged = False
                         guard_since = time.monotonic()  # Fresh startup timeout window
                     else:
                         log(f"[{role}] Warning: agent never entered processing state after "
                             f"{IDLE_GRACE_SECONDS}s, enabling idle grace timer")
                         agent_started = True
+                        idle_output_snapshot = current_idle_output
                         idle_since = time.monotonic()
                 # else: skip grace timer — agent hasn't started yet
             elif idle_since is None:
@@ -648,7 +698,9 @@ def wait_for_response_file(
                     api.send_input(terminal_id, reminder)
                     idle_since = None  # Reset grace timer for next cycle
                     idle_output_snapshot = None  # Re-sample output in next idle cycle
+                    startup_idle_output_snapshot = None
                     agent_started = False  # Re-arm startup guard for reminder
+                    output_change_logged = False
                     guard_since = time.monotonic()  # Fresh startup timeout window
                 elif STRICT_FILE_HANDOFF:
                     raise RuntimeError(
@@ -667,6 +719,7 @@ def wait_for_response_file(
         else:
             idle_since = None  # Reset if terminal is processing or file appeared
             idle_output_snapshot = None
+            startup_idle_output_snapshot = None
 
         elapsed = time.monotonic() - start
         if elapsed > timeout:

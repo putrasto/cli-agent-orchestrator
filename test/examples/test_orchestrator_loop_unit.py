@@ -1083,6 +1083,47 @@ class TestStartupGuard:
         assert "Fast result." in result
         assert mock_status.call_count == 2
 
+    @patch.object(orch.api, "get_last_output")
+    @patch.object(orch.api, "get_status")
+    def test_startup_guard_treats_idle_output_change_as_activity(
+        self, mock_status, mock_last_output, tmp_path
+    ):
+        """If status stays completed but output changes, treat that as agent activity.
+
+        This covers providers that can briefly misreport stale/completed while the
+        CLI is still producing output (observed with tester on claude_code).
+        """
+        orch.RESPONSE_DIR = tmp_path
+        orch.WD = str(tmp_path)
+        orch._run_timestamp = "test-run"
+        orch._response_seq = 0
+        orch.POLL_SECONDS = 0
+        orch.STRICT_FILE_HANDOFF = True
+        orch.IDLE_GRACE_SECONDS = 10
+        resp_file = tmp_path / "analyst_summary.md"
+
+        call_count = [0]
+
+        def status_side_effect(tid):
+            call_count[0] += 1
+            if call_count[0] < 4:
+                return "completed"
+            if not resp_file.exists():
+                resp_file.write_text("ANALYST_SUMMARY:\nCompleted after hidden activity.")
+            return "idle"
+
+        mock_status.side_effect = status_side_effect
+        mock_last_output.side_effect = [
+            "prompt only",
+            "prompt only\nrunning tests...",
+            "prompt only\nrunning tests...\nmore output",
+        ]
+
+        result = orch.wait_for_response_file("analyst", "term-001", timeout=10)
+
+        assert "Completed after hidden activity." in result
+        assert mock_last_output.call_count >= 2
+
     @patch.object(orch.api, "get_status", return_value="completed")
     def test_startup_guard_response_file_during_startup(self, mock_status, tmp_path):
         """Response file appears while startup guard is active → return immediately."""
