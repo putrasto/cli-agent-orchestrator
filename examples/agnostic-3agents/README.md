@@ -132,6 +132,7 @@ Environment variables > JSON config file > hardcoded defaults. Empty env vars ar
 | `STATE_FILE` | `.tmp/agnostic-3agents-loop-state.json` | Path to state file |
 
 Auto-resume: if a state file exists with `final_status=RUNNING`, the orchestrator resumes automatically without needing `RESUME=1`.
+On terminal completion (`PASS` or max-round `FAIL`), the canonical state file is moved to `.tmp/<run-timestamp>/agnostic-3agents-loop-state.json`.
 
 ## Scenarios
 

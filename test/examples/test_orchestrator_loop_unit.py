@@ -676,6 +676,45 @@ class TestStateManagement:
             orch.STATE_FILE = original_state_file
 
 
+class TestStateArchive:
+    def test_archive_state_file_moves_to_run_archive(self, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text('{"final_status":"PASS"}\n')
+
+        original_state_file = orch.STATE_FILE
+        original_wd = orch.WD
+        original_ts = orch._run_timestamp
+        try:
+            orch.STATE_FILE = str(state_file)
+            orch.WD = str(tmp_path)
+            orch._run_timestamp = "2026-01-01T00-00-00"
+
+            orch.archive_state_file()
+
+            archived = tmp_path / ".tmp" / "2026-01-01T00-00-00" / "state.json"
+            assert not state_file.exists()
+            assert archived.exists()
+            assert archived.read_text() == '{"final_status":"PASS"}\n'
+        finally:
+            orch.STATE_FILE = original_state_file
+            orch.WD = original_wd
+            orch._run_timestamp = original_ts
+
+    def test_archive_state_file_missing_is_noop(self, tmp_path):
+        original_state_file = orch.STATE_FILE
+        original_wd = orch.WD
+        original_ts = orch._run_timestamp
+        try:
+            orch.STATE_FILE = str(tmp_path / "missing.json")
+            orch.WD = str(tmp_path)
+            orch._run_timestamp = "2026-01-01T00-00-00"
+            orch.archive_state_file()  # no raise
+        finally:
+            orch.STATE_FILE = original_state_file
+            orch.WD = original_wd
+            orch._run_timestamp = original_ts
+
+
 # ── File handoff helpers ────────────────────────────────────────────────────
 
 
@@ -3791,6 +3830,7 @@ class TestNotifyCallSites:
 
     @patch("run_orchestrator_loop.notify")
     @patch("run_orchestrator_loop.cleanup")
+    @patch("run_orchestrator_loop.archive_state_file")
     @patch("run_orchestrator_loop.run_post_processing")
     @patch("run_orchestrator_loop.save_state")
     @patch("run_orchestrator_loop.send_and_wait",
@@ -3802,7 +3842,7 @@ class TestNotifyCallSites:
     @patch("run_orchestrator_loop.ApiClient")
     def test_pass_notification_from_main(
         self, mock_api_cls, mock_apply, mock_load_cfg, mock_verify,
-        mock_ensure, mock_saw, mock_save, mock_post, mock_cleanup, mock_notify, tmp_path
+        mock_ensure, mock_saw, mock_save, mock_post, mock_archive, mock_cleanup, mock_notify, tmp_path
     ):
         """PASS result in tester phase calls notify('Pipeline PASS', ...)."""
         mock_load_cfg.return_value = {}
@@ -3848,12 +3888,14 @@ class TestNotifyCallSites:
                           if c[0][0] == "Pipeline PASS"]
             assert len(pass_calls) == 1
             assert "round 1" in pass_calls[0][0][1]
+            mock_archive.assert_called_once()
         finally:
             for k, v in orig.items():
                 setattr(orch, k, v)
 
     @patch("run_orchestrator_loop.notify")
     @patch("run_orchestrator_loop.cleanup")
+    @patch("run_orchestrator_loop.archive_state_file")
     @patch("run_orchestrator_loop.save_state")
     @patch("run_orchestrator_loop.send_and_wait",
            return_value="RESULT: FAIL\nEVIDENCE:\n- Test failed")
@@ -3864,7 +3906,7 @@ class TestNotifyCallSites:
     @patch("run_orchestrator_loop.ApiClient")
     def test_fail_max_rounds_notification_from_main(
         self, mock_api_cls, mock_apply, mock_load_cfg, mock_verify,
-        mock_ensure, mock_saw, mock_save, mock_cleanup, mock_notify, tmp_path
+        mock_ensure, mock_saw, mock_save, mock_archive, mock_cleanup, mock_notify, tmp_path
     ):
         """Max rounds exhausted calls notify('Pipeline FAIL', ..., priority=4)."""
         mock_load_cfg.return_value = {}
@@ -3910,6 +3952,7 @@ class TestNotifyCallSites:
             assert len(fail_calls) == 1
             assert "1 rounds" in fail_calls[0][0][1] or "1" in fail_calls[0][0][1]
             assert fail_calls[0][1]["priority"] == 4
+            mock_archive.assert_called_once()
         finally:
             for k, v in orig.items():
                 setattr(orch, k, v)

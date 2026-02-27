@@ -1247,6 +1247,28 @@ def save_state() -> None:
     state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
 
+def archive_state_file() -> None:
+    """Move the canonical state file into the per-run archive directory."""
+    state_path = Path(STATE_FILE)
+    if not state_path.exists():
+        return
+
+    if _run_timestamp:
+        dest_dir = _archive_dir()
+    else:
+        # Fallback for unexpected call paths before ensure_response_dir().
+        dest_dir = state_path.parent / datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / state_path.name
+    if dest.exists():
+        suffix = datetime.now().strftime("%Y%m%d%H%M%S")
+        dest = dest_dir / f"{state_path.stem}-{suffix}{state_path.suffix}"
+
+    state_path.rename(dest)
+    log(f"Archived state file: {dest}")
+
+
 def load_state() -> bool:
     global session_name, current_round, current_phase, final_status
     global feedback, analyst_feedback, programmer_feedback, programmer_context_for_retry
@@ -1867,6 +1889,7 @@ def main() -> None:
                 log("FINAL: PASS")
                 notify("Pipeline PASS", f"[{session_name}] Completed in round {rnd}")
                 run_post_processing(WD)
+                archive_state_file()
                 cleanup(_save=False)
                 sys.exit(0)
 
@@ -1882,6 +1905,7 @@ def main() -> None:
     save_state()
     log(f"Reached MAX_ROUNDS={MAX_ROUNDS} without PASS")
     notify("Pipeline FAIL", f"[{session_name}] Exhausted {MAX_ROUNDS} rounds without PASS", priority=4)
+    archive_state_file()
     cleanup(_save=False)
     sys.exit(1)
 
