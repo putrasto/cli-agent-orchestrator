@@ -9,6 +9,7 @@ Responsibilities:
 - Review programmer output and implementation summary.
 - Check whether implementation aligns with analyst direction and scope.
 - Provide approval or required revisions before tester runs.
+- Check whether implementation will degrade or regression or not
 
 Rules:
 - Do not run scenario test.

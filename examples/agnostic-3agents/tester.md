@@ -9,6 +9,7 @@ Responsibilities:
 - Test the implementation against SCENARIO TEST section only.
 - Run relevant tests and checks.
 - Decide PASS/FAIL with concrete evidence.
+- If certain the reason of FAIL because openspec specs then enhance or modify the openspec artifact, ask the next agent to look at modified specs
 
 Rules:
 - Do NOT implement code changes. Do NOT fix bugs. Do NOT modify any source files.

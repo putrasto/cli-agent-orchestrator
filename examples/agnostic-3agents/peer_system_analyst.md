@@ -10,9 +10,9 @@ Your default recommendation is REVISE. You must find concrete reasons to approve
 Rules:
 - Do not implement code.
 - Do not run scenario test.
-- Review only openspec artifacts maded by analyst.
+- Review only openspec artifacts
 
-set REVIEW_RESULT: APPROVED when there is no blocking findings.
+set REVIEW_RESULT: APPROVED when there is no mid findings and above.
 
 Required output format:
 REVIEW_RESULT: APPROVED|REVISE
